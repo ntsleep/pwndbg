@@ -1,8 +1,8 @@
 import gdb
 from capstone import *  # noqa: F403
 
-import pwndbg.lib.memoize
-import pwndbg.symbol
+import pwndbg.gdblib.symbol
+import pwndbg.lib.cache
 
 debug = False
 
@@ -12,14 +12,15 @@ access = {v: k for k, v in globals().items() if k.startswith("CS_AC_")}
 
 for value1, name1 in dict(access).items():
     for value2, name2 in dict(access).items():
-        access.setdefault(value1 | value2, "%s | %s" % (name1, name2))
+        # novermin
+        access.setdefault(value1 | value2, f"{name1} | {name2}")
 
 
 class DisassemblyAssistant:
     # Registry of all instances, {architecture: instance}
     assistants = {}
 
-    def __init__(self, architecture):
+    def __init__(self, architecture) -> None:
         if architecture is not None:
             self.assistants[architecture] = self
 
@@ -36,7 +37,7 @@ class DisassemblyAssistant:
         }
 
     @staticmethod
-    def enhance(instruction):
+    def enhance(instruction) -> None:
         enhancer = DisassemblyAssistant.assistants.get(
             pwndbg.gdblib.arch.current, generic_assistant
         )
@@ -48,7 +49,7 @@ class DisassemblyAssistant:
         if debug:
             print(enhancer.dump(instruction))
 
-    def enhance_conditional(self, instruction):
+    def enhance_conditional(self, instruction) -> None:
         """
         Adds a ``condition`` field to the instruction.
 
@@ -70,10 +71,10 @@ class DisassemblyAssistant:
 
         instruction.condition = c
 
-    def condition(self, instruction):
+    def condition(self, instruction) -> bool:
         return False
 
-    def enhance_next(self, instruction):
+    def enhance_next(self, instruction) -> None:
         """
         Adds a ``next`` field to the instruction.
 
@@ -151,7 +152,7 @@ class DisassemblyAssistant:
 
         return int(addr)
 
-    def enhance_symbol(self, instruction):
+    def enhance_symbol(self, instruction) -> None:
         """
         Adds a ``symbol`` and ``symbol_addr`` fields to the instruction.
 
@@ -172,7 +173,7 @@ class DisassemblyAssistant:
         instruction.symbol = o.symbol
         instruction.symbol_addr = o.int
 
-    def enhance_operands(self, instruction):
+    def enhance_operands(self, instruction) -> None:
         """
         Enhances all of the operands in the instruction, by adding the following
         fields:
@@ -197,12 +198,12 @@ class DisassemblyAssistant:
             op.str = self.op_names.get(op.type, lambda *a: None)(instruction, op)
 
             if op.int:
-                op.symbol = pwndbg.symbol.get(op.int)
+                op.symbol = pwndbg.gdblib.symbol.get(op.int)
 
     def immediate(self, instruction, operand):
         return operand.value.imm
 
-    def immediate_sz(self, instruction, operand):
+    def immediate_sz(self, instruction, operand) -> str:
         value = operand.int
 
         if abs(value) < 0x10:
@@ -239,7 +240,7 @@ class DisassemblyAssistant:
         """
         ins = instruction
         rv = []
-        rv.append("%s %s" % (ins.mnemonic, ins.op_str))
+        rv.append(f"{ins.mnemonic} {ins.op_str}")
 
         for i, group in enumerate(ins.groups):
             rv.append("   groups[%i]   = %s" % (i, groups.get(group, group)))
@@ -254,9 +255,9 @@ class DisassemblyAssistant:
             if op.int is not None:
                 rv.append("            int = %#x" % (op.int))
             if op.symbol is not None:
-                rv.append("            sym = %s" % (op.symbol))
+                rv.append(f"            sym = {(op.symbol)}")
             if op.str is not None:
-                rv.append("            str = %s" % (op.str))
+                rv.append(f"            str = {(op.str)}")
 
         return "\n".join(rv)
 

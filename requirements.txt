@@ -1,24 +1,16 @@
-attrs==21.4.0
-capstone==4.0.2
-enum34==1.1.10
-future==0.18.2
-iniconfig==1.1.1
-isort==5.10.1
-packaging==21.3
-pbr==5.9.0
-pluggy==1.0.0
-psutil==5.9.1
-py==1.11.0
+setuptools-rust; python_version < '3.7'
+capstone==5.0.0rc4
+psutil==5.9.5
+pwntools==4.10.0
 pycparser==2.21
-pyelftools==0.28
-Pygments==2.12.0
-pyparsing==3.0.9
-python-ptrace==0.9.8
-ROPGadget==6.8
-six==1.16.0
-testresources==2.0.1
-tomli==2.0.1; python_version >= '3.7'
-tomli==1.2.3; python_version < '3.7'
-unicorn==2.0.0; python_version >= '3.7'
+pyelftools==0.29
+Pygments==2.14.0; python_version < '3.7'
+Pygments==2.15.1; python_version >= '3.7'
+ROPGadget==7.2
+tabulate==0.8.10; python_version < '3.7'
+tabulate==0.9.0; python_version >= '3.7'
+typing-extensions==4.6.1; python_version >= '3.7'
+typing-extensions==4.1.1; python_version < '3.7'
+unicorn==2.0.1.post1; python_version >= '3.7'
 unicorn==2.0.0rc7; python_version < '3.7'
-pwntools==4.8.0
+requests>=2.20.0

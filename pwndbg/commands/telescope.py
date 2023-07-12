@@ -7,53 +7,46 @@ Generally used to print out the stack or register values.
 import argparse
 import collections
 import math
+from typing import List
 
 import pwndbg.chain
 import pwndbg.color.telescope as T
-import pwndbg.color.theme as theme
 import pwndbg.commands
-import pwndbg.config
 import pwndbg.gdblib.arch
+import pwndbg.gdblib.config
 import pwndbg.gdblib.memory
 import pwndbg.gdblib.regs
 import pwndbg.gdblib.typeinfo
+from pwndbg.color import theme
+from pwndbg.commands import CommandCategory
 
-telescope_lines = pwndbg.config.Parameter(
+telescope_lines = pwndbg.gdblib.config.add_param(
     "telescope-lines", 8, "number of lines to printed by the telescope command"
 )
-skip_repeating_values = pwndbg.config.Parameter(
+skip_repeating_values = pwndbg.gdblib.config.add_param(
     "telescope-skip-repeating-val",
     True,
     "whether to skip repeating values of the telescope command",
 )
-skip_repeating_values_minimum = pwndbg.config.Parameter(
+skip_repeating_values_minimum = pwndbg.gdblib.config.add_param(
     "telescope-skip-repeating-val-minimum",
     3,
     "minimum amount of repeated values before skipping lines",
 )
 
-offset_separator = theme.Parameter(
+offset_separator = theme.add_param(
     "telescope-offset-separator", "│", "offset separator of the telescope command"
 )
-offset_delimiter = theme.Parameter(
+offset_delimiter = theme.add_param(
     "telescope-offset-delimiter", ":", "offset delimiter of the telescope command"
 )
-repeating_marker = theme.Parameter(
+repeating_marker = theme.add_param(
     "telescope-repeating-marker", "... ↓", "repeating values marker of the telescope command"
 )
 
 
 parser = argparse.ArgumentParser(
-    description="""
-    Recursively dereferences pointers starting at the specified address
-    ($sp by default)
-    """
-)
-parser.add_argument(
-    "address", nargs="?", default=None, type=int, help="The address to telescope at."
-)
-parser.add_argument(
-    "count", nargs="?", default=telescope_lines, type=int, help="The number of lines to show."
+    description="Recursively dereferences pointers starting at the specified address."
 )
 parser.add_argument(
     "-r",
@@ -64,8 +57,16 @@ parser.add_argument(
     help="Show <count> previous addresses instead of next ones",
 )
 
+parser.add_argument(
+    "address", nargs="?", default="$sp", type=int, help="The address to telescope at."
+)
 
-@pwndbg.commands.ArgparsedCommand(parser)
+parser.add_argument(
+    "count", nargs="?", default=telescope_lines, type=int, help="The number of lines to show."
+)
+
+
+@pwndbg.commands.ArgparsedCommand(parser, category=CommandCategory.MEMORY)
 @pwndbg.commands.OnlyWhenRunning
 def telescope(address=None, count=telescope_lines, to_string=False, reverse=False):
     """
@@ -80,18 +81,19 @@ def telescope(address=None, count=telescope_lines, to_string=False, reverse=Fals
         telescope.offset = 0
 
     address = int(address if address else pwndbg.gdblib.regs.sp) & pwndbg.gdblib.arch.ptrmask
+    input_address = address
     count = max(int(count), 1) & pwndbg.gdblib.arch.ptrmask
     delimiter = T.delimiter(offset_delimiter)
     separator = T.separator(offset_separator)
-
-    # Allow invocation of telescope -r to dump previous addresses
-    if reverse:
-        address -= (count - 1) * ptrsize
 
     # Allow invocation of "telescope 20" to dump 20 bytes at the stack pointer
     if address < pwndbg.gdblib.memory.MMAP_MIN_ADDR and not pwndbg.gdblib.memory.peek(address):
         count = address
         address = pwndbg.gdblib.regs.sp
+
+    # Allow invocation of telescope -r to dump previous addresses
+    if reverse:
+        address -= (count - 1) * ptrsize
 
     # Allow invocation of "telescope a b" to dump all bytes from A to B
     if int(address) <= int(count):
@@ -103,7 +105,6 @@ def telescope(address=None, count=telescope_lines, to_string=False, reverse=Fals
     reg_values = collections.defaultdict(lambda: [])
     for reg in pwndbg.gdblib.regs.common:
         reg_values[pwndbg.gdblib.regs[reg]].append(reg)
-    # address    = pwndbg.gdblib.memory.poi(pwndbg.gdblib.typeinfo.ppvoid, address)
 
     start = address
     stop = address + (count * ptrsize)
@@ -128,7 +129,7 @@ def telescope(address=None, count=telescope_lines, to_string=False, reverse=Fals
     # Print everything out
     result = []
     last = None
-    collapse_buffer = []
+    collapse_buffer: List[str] = []
     skipped_padding = (
         2
         + len(offset_delimiter)
@@ -141,7 +142,7 @@ def telescope(address=None, count=telescope_lines, to_string=False, reverse=Fals
     )
 
     # Collapse repeating values exceeding minimum delta.
-    def collapse_repeating_values():
+    def collapse_repeating_values() -> None:
         # The first line was already printed, hence increment by 1
         if collapse_buffer and len(collapse_buffer) + 1 >= skip_repeating_values_minimum:
             result.append(
@@ -179,7 +180,7 @@ def telescope(address=None, count=telescope_lines, to_string=False, reverse=Fals
         # Buffer repeating values.
         if skip_repeating_values:
             value = pwndbg.gdblib.memory.pvoid(addr)
-            if last == value:
+            if last == value and addr != input_address:
                 collapse_buffer.append(line)
                 continue
             collapse_repeating_values()
@@ -198,7 +199,7 @@ def telescope(address=None, count=telescope_lines, to_string=False, reverse=Fals
 
 
 parser = argparse.ArgumentParser(
-    description="dereferences on stack data with specified count and offset."
+    description="Dereferences on stack data with specified count and offset."
 )
 parser.add_argument("count", nargs="?", default=8, type=int, help="number of element to dump")
 parser.add_argument(
@@ -210,9 +211,9 @@ parser.add_argument(
 )
 
 
-@pwndbg.commands.ArgparsedCommand(parser)
+@pwndbg.commands.ArgparsedCommand(parser, category=CommandCategory.STACK)
 @pwndbg.commands.OnlyWhenRunning
-def stack(count, offset):
+def stack(count, offset) -> None:
     ptrsize = pwndbg.gdblib.typeinfo.ptrsize
     telescope.repeat = stack.repeat
     telescope(address=pwndbg.gdblib.regs.sp + offset * ptrsize, count=count)

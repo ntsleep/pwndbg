@@ -7,7 +7,7 @@ import gdb
 import pwndbg.gdblib.arch
 import pwndbg.gdblib.memory
 import pwndbg.gdblib.typeinfo
-import pwndbg.vmmap
+import pwndbg.gdblib.vmmap
 
 
 def search(searchfor, mappings=None, start=None, end=None, executable=False, writable=False):
@@ -27,7 +27,7 @@ def search(searchfor, mappings=None, start=None, end=None, executable=False, wri
     """
     i = gdb.selected_inferior()
 
-    maps = mappings or pwndbg.vmmap.get()
+    maps = mappings or pwndbg.gdblib.vmmap.get()
 
     if end and start:
         assert start < end, "Last address to search must be greater then first address"
@@ -35,7 +35,7 @@ def search(searchfor, mappings=None, start=None, end=None, executable=False, wri
     elif start:
         maps = [m for m in maps if start in m]
     elif end:
-        maps = [m for m in maps if (end - 1) in m]
+        maps = [m for m in maps if end - 1 in m]
 
     if executable:
         maps = [m for m in maps if m.execute]

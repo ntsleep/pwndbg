@@ -3,29 +3,16 @@ Common types, and routines for manually loading types from file
 via GCC.
 """
 
-import glob
-import os
-import subprocess
 import sys
 
 import gdb
 
-import pwndbg.gdblib.events
+import pwndbg.lib.cache
 import pwndbg.lib.gcc
-import pwndbg.lib.memoize
 import pwndbg.lib.tempfile
 
 module = sys.modules[__name__]
-
-
-def is_pointer(value):
-    type = value
-
-    if isinstance(value, gdb.Value):
-        type = value.type
-
-    type = type.strip_typedefs()
-    return type.code == gdb.TYPE_CODE_PTR
+ptrsize: int
 
 
 def lookup_types(*types):
@@ -38,11 +25,22 @@ def lookup_types(*types):
 
 
 def update():
+    # Workaround for Rust stuff, see https://github.com/pwndbg/pwndbg/issues/855
+    lang = gdb.execute("show language", to_string=True)
+    if "rust" not in lang:
+        restore_lang = None
+    else:
+        gdb.execute("set language c")
+        if '"auto;' in lang:
+            restore_lang = "auto"
+        else:
+            restore_lang = "rust"
+
     module.char = gdb.lookup_type("char")
     module.ulong = lookup_types("unsigned long", "uint", "u32", "uint32")
     module.long = lookup_types("long", "int", "i32", "int32")
     module.uchar = lookup_types("unsigned char", "ubyte", "u8", "uint8")
-    module.ushort = lookup_types("unsigned short", "ushort", "u16", "uint16")
+    module.ushort = lookup_types("unsigned short", "ushort", "u16", "uint16", "uint16_t")
     module.uint = lookup_types("unsigned int", "uint", "u32", "uint32")
     module.void = lookup_types("void", "()")
 
@@ -58,9 +56,9 @@ def update():
     }
 
     module.int8 = lookup_types("char", "i8", "int8")
-    module.int16 = lookup_types("short", "i16", "int16")
+    module.int16 = lookup_types("short", "short int", "i16", "int16")
     module.int32 = lookup_types("int", "i32", "int32")
-    module.int64 = lookup_types("long long", "long", "i64", "int64")
+    module.int64 = lookup_types("long long", "long long int", "long", "i64", "int64")
     module.signed = {1: module.int8, 2: module.int16, 4: module.int32, 8: module.int64}
 
     module.pvoid = void.pointer()
@@ -81,155 +79,34 @@ def update():
         raise Exception("Pointer size not supported")
     module.null = gdb.Value(0).cast(void)
 
+    # Rust workaround part 2
+    if restore_lang:
+        gdb.execute(f"set language {restore_lang}")
+
 
 # TODO: Remove this global initialization, or move it somewhere else
 # Call it once so we load all of the types
 update()
 
-# Trial and error until things work
-blacklist = [
-    "regexp.h",
-    "xf86drm.h",
-    "libxl_json.h",
-    "xf86drmMode.h",
-    "caca0.h",
-    "xenguest.h",
-    "_libxl_types_json.h",
-    "term_entry.h",
-    "slcurses.h",
-    "pcreposix.h",
-    "sudo_plugin.h",
-    "tic.h",
-    "sys/elf.h",
-    "sys/vm86.h",
-    "xenctrlosdep.h",
-    "xenctrl.h",
-    "cursesf.h",
-    "cursesm.h",
-    "gdbm.h",
-    "dbm.h",
-    "gcrypt-module.h",
-    "term.h",
-    "gmpxx.h",
-    "pcap/namedb.h",
-    "pcap-namedb.h",
-    "evr.h",
-    "mpc.h",
-    "fdt.h",
-    "mpfr.h",
-    "evrpc.h",
-    "png.h",
-    "zlib.h",
-    "pngconf.h",
-    "libelfsh.h",
-    "libmjollnir.h",
-    "hwloc.h",
-    "ares.h",
-    "revm.h",
-    "ares_rules.h",
-    "libunwind-ptrace.h",
-    "libui.h",
-    "librevm-color.h",
-    "libedfmt.h",
-    "revm-objects.h",
-    "libetrace.h",
-    "revm-io.h",
-    "libasm-mips.h",
-    "libstderesi.h",
-    "libasm.h",
-    "libaspect.h",
-    "libunwind.h",
-    "libmjollnir-objects.h",
-    "libunwind-coredump.h",
-    "libunwind-dynamic.h",
-]
 
-
-def load(name):
-    """Load symbol by name from headers in standard system include directory"""
+def load(name: str):
+    """Load a GDB symbol; note that new symbols can be added with `add-symbol-file` functionality"""
     try:
         return gdb.lookup_type(name)
     except gdb.error:
-        pass
-
-    # s, _ = gdb.lookup_symbol(name)
-
-    # Try to find an architecture-specific include path
-    arch = pwndbg.gdblib.arch.current.split(":")[0]
-
-    include_dir = glob.glob("/usr/%s*/include" % arch)
-
-    if include_dir:
-        include_dir = include_dir[0]
-    else:
-        include_dir = "/usr/include"
-
-    source = "#include <fstream>\n"
-
-    for subdir in ["", "sys", "netinet"]:
-        dirname = os.path.join(include_dir, subdir)
-        for path in glob.glob(os.path.join(dirname, "*.h")):
-            if any(b in path for b in blacklist):
-                continue
-            print(path)
-            source += '#include "%s"\n' % path
-
-    source += """
-{name} foo;
-""".format(
-        **locals()
-    )
-
-    filename = "%s/%s_%s.cc" % (
-        pwndbg.lib.tempfile.cachedir("typeinfo"),
-        arch,
-        "-".join(name.split()),
-    )
-
-    with open(filename, "w+") as f:
-        f.write(source)
-        f.flush()
-        os.fsync(f.fileno())
-
-    compile(filename)
-
-    return gdb.lookup_type(name)
+        return None
 
 
-def compile(filename=None, address=0):
-    """Compile and extract symbols from specified file"""
-    if filename is None:
-        print("Specify a filename to compile.")
-        return
-
-    objectname = os.path.splitext(filename)[0] + ".o"
-
-    if not os.path.exists(objectname):
-        gcc = pwndbg.lib.gcc.which(pwndbg.gdblib.arch)
-        gcc += ["-w", "-c", "-g", filename, "-o", objectname]
-        try:
-            subprocess.check_output(gcc)
-        except subprocess.CalledProcessError as e:
-            return
-
-    add_symbol_file(objectname, address)
-
-
-def add_symbol_file(filename=None, address=0):
-    """Read additional symbol table information from the object file filename"""
-    if filename is None:
-        print("Specify a symbol file to add.")
-        return
-
-    with pwndbg.gdblib.events.Pause():
-        gdb.execute(
-            "add-symbol-file %s %s" % (filename, address),
-            from_tty=False,
-            to_string=True,
-        )
-
-
-def read_gdbvalue(type_name, addr):
+def read_gdbvalue(type_name: str, addr):
     """Read the memory contents at addr and interpret them as a GDB value with the given type"""
     gdb_type = pwndbg.gdblib.typeinfo.load(type_name)
     return gdb.Value(addr).cast(gdb_type.pointer()).dereference()
+
+
+def get_type(size: int):
+    return {
+        1: pwndbg.gdblib.typeinfo.uint8,
+        2: pwndbg.gdblib.typeinfo.uint16,
+        4: pwndbg.gdblib.typeinfo.uint32,
+        8: pwndbg.gdblib.typeinfo.uint64,
+    }[size]

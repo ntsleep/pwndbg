@@ -1,9 +1,10 @@
 import os
 import re
+from collections import namedtuple
+from typing import Any
+from typing import List
 
-import pwndbg.lib.memoize
-
-from . import theme as theme
+from . import theme
 
 NORMAL = "\x1b[0m"
 BLACK = "\x1b[30m"
@@ -27,8 +28,16 @@ BOLD = "\x1b[1m"
 UNDERLINE = "\x1b[4m"
 
 
-def none(x):
-    return str(x)
+# We assign `none` instead of creating a function since it is faster this way
+# While this is a microptimization, the `none` may be called thousands of times with
+# a single context or a `hexdump $rsp 5000` call
+# A simple benchmark below:
+#   In [1]: def f(x): return str(x)
+#   In [2]: %timeit f('')
+#   117 ns ± 0.642 ns per loop (mean ± std. dev. of 7 runs, 10000000 loops each)
+#   In [3]: %timeit str('')
+#   72 ns ± 0.222 ns per loop (mean ± std. dev. of 7 runs, 10000000 loops each)
+none = str
 
 
 def normal(x):
@@ -115,29 +124,54 @@ def colorize(x, color):
     return color + terminateWith(str(x), color) + NORMAL
 
 
-disable_colors = theme.Parameter(
+disable_colors = theme.add_param(
     "disable-colors",
     bool(os.environ.get("PWNDBG_DISABLE_COLORS")),
     "whether to color the output or not",
 )
 
 
-@pwndbg.lib.memoize.reset_on_stop
 def generateColorFunctionInner(old, new):
-    def wrapper(text):
+    def wrapper(text: str):
         return new(old(text))
 
     return wrapper
 
 
-def generateColorFunction(config):
-    function = lambda x: x
+ColorParamSpec = namedtuple("ColorParamSpec", ["name", "default", "doc"])
+
+
+class ColorConfig:
+    def __init__(self, namespace: str, params: List[ColorParamSpec]) -> None:
+        self._namespace = namespace
+        self._params = {}
+        for param in params:
+            self._params[param.name] = theme.add_color_param(
+                f"{self._namespace}-{param.name}-color", param.default, param.doc
+            )
+
+    def __getattr__(self, attr):
+        param_name = attr.replace("_", "-")
+        if param_name in self._params:
+            return generateColorFunction(self._params[param_name])
+
+        raise AttributeError(f"ColorConfig object for {self._namespace} has no attribute '{attr}'")
+
+
+def generateColorFunction(config: str, _globals=globals()):
+    # the `config` here may be a config Parameter object
+    # and if we run with disable_colors or if the config value
+    # is empty, we need to ensure we cast it to string
+    # so it can be properly formatted e.g. with:
+    # "{config_param:5}".format(config_param=some_config_parameter)
+    function = str
 
     if disable_colors:
         return function
 
     for color in config.split(","):
-        function = generateColorFunctionInner(function, globals()[color.lower().replace("-", "_")])
+        func_name = color.lower().replace("-", "_")
+        function = generateColorFunctionInner(function, _globals[func_name])
     return function
 
 
@@ -146,7 +180,7 @@ def strip(x):
 
 
 def terminateWith(x, color):
-    return re.sub("\x1b\\[0m", NORMAL + color, x)
+    return x.replace("\x1b[0m", NORMAL + color)
 
 
 def ljust_colored(x, length, char=" "):

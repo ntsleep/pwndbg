@@ -1,10 +1,10 @@
 import gdb
 
+import pwndbg.gdblib.abi
 import pwndbg.gdblib.arch
 import pwndbg.gdblib.events
 import pwndbg.gdblib.memory
 import pwndbg.gdblib.regs
-import pwndbg.lib.abi
 
 #: Total number of arguments
 argc = None
@@ -21,7 +21,7 @@ envc = None
 
 @pwndbg.gdblib.events.start
 @pwndbg.gdblib.abi.LinuxOnly()
-def update():
+def update() -> None:
     global argc
     global argv
     global envp

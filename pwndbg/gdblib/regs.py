@@ -6,31 +6,32 @@ import ctypes
 import re
 import sys
 from types import ModuleType
+from typing import Dict
+from typing import List
 
 import gdb
 
 import pwndbg.gdblib.arch
 import pwndbg.gdblib.events
+import pwndbg.gdblib.proc
 import pwndbg.gdblib.remote
-import pwndbg.lib.memoize
-import pwndbg.proc
+import pwndbg.lib.cache
 from pwndbg.lib.regs import reg_sets
 
 
-@pwndbg.proc.OnlyWhenRunning
-def gdb77_get_register(name):
+@pwndbg.gdblib.proc.OnlyWhenRunning
+def gdb77_get_register(name: str):
     return gdb.parse_and_eval("$" + name)
 
 
-@pwndbg.proc.OnlyWhenRunning
-def gdb79_get_register(name):
+@pwndbg.gdblib.proc.OnlyWhenRunning
+def gdb79_get_register(name: str):
     return gdb.selected_frame().read_register(name)
 
 
-try:
-    gdb.Frame.read_register
+if hasattr(gdb.Frame, "read_register"):
     get_register = gdb79_get_register
-except AttributeError:
+else:
     get_register = gdb77_get_register
 
 
@@ -41,11 +42,10 @@ ARCH_GET_GS = 0x1004
 
 
 class module(ModuleType):
-    last = {}
+    last: Dict[str, int] = {}
 
-    @pwndbg.lib.memoize.reset_on_stop
-    @pwndbg.lib.memoize.reset_on_prompt
-    def __getattr__(self, attr):
+    @pwndbg.lib.cache.cache_until("stop", "prompt")
+    def __getattr__(self, attr: str) -> int:
         attr = attr.lstrip("$")
         try:
             # Seriously, gdb? Only accepts uint32.
@@ -68,16 +68,18 @@ class module(ModuleType):
         except (ValueError, gdb.error):
             return None
 
-    @pwndbg.lib.memoize.reset_on_stop
-    @pwndbg.lib.memoize.reset_on_prompt
-    def __getitem__(self, item):
+    def __setattr__(self, attr, val):
+        if attr in ("last", "previous"):
+            return super().__setattr__(attr, val)
+        else:
+            # Not catching potential gdb.error as this should never
+            # be called in a case when this can throw
+            gdb.execute(f"set ${attr} = {val}")
+
+    @pwndbg.lib.cache.cache_until("stop", "prompt")
+    def __getitem__(self, item: str) -> int:
         if not isinstance(item, str):
             print("Unknown register type: %r" % (item))
-            import pdb
-            import traceback
-
-            traceback.print_stack()
-            pdb.set_trace()
             return None
 
         # e.g. if we're looking for register "$rax", turn it into "rax"
@@ -88,6 +90,10 @@ class module(ModuleType):
             return int(item) & pwndbg.gdblib.arch.ptrmask
 
         return item
+
+    def __contains__(self, reg) -> bool:
+        regs = set(reg_sets[pwndbg.gdblib.arch.current]) | {"pc", "sp"}
+        return reg in regs
 
     def __iter__(self):
         regs = set(reg_sets[pwndbg.gdblib.arch.current]) | {"pc", "sp"}
@@ -108,7 +114,7 @@ class module(ModuleType):
         return reg_sets[pwndbg.gdblib.arch.current].common
 
     @property
-    def frame(self):
+    def frame(self) -> str:
         return reg_sets[pwndbg.gdblib.arch.current].frame
 
     @property
@@ -130,7 +136,7 @@ class module(ModuleType):
     @property
     def all(self):
         regs = reg_sets[pwndbg.gdblib.arch.current]
-        retval = []
+        retval: List[str] = []
         for regset in (
             regs.pc,
             regs.stack,
@@ -152,7 +158,7 @@ class module(ModuleType):
 
     def fix(self, expression):
         for regname in set(self.all + ["sp", "pc"]):
-            expression = re.sub(r"\$?\b%s\b" % regname, r"$" + regname, expression)
+            expression = re.sub(rf"\$?\b{regname}\b", r"$" + regname, expression)
         return expression
 
     def items(self):
@@ -170,23 +176,23 @@ class module(ModuleType):
         return delta
 
     @property
-    @pwndbg.lib.memoize.reset_on_stop
+    @pwndbg.lib.cache.cache_until("stop")
     def fsbase(self):
         return self._fs_gs_helper("fs_base", ARCH_GET_FS)
 
     @property
-    @pwndbg.lib.memoize.reset_on_stop
+    @pwndbg.lib.cache.cache_until("stop")
     def gsbase(self):
         return self._fs_gs_helper("gs_base", ARCH_GET_GS)
 
-    @pwndbg.lib.memoize.reset_on_stop
-    def _fs_gs_helper(self, regname, which):
+    @pwndbg.lib.cache.cache_until("stop")
+    def _fs_gs_helper(self, regname: str, which):
         """Supports fetching based on segmented addressing, a la fs:[0x30].
         Requires ptrace'ing the child directly for GDB < 8."""
 
         # For GDB >= 8.x we can use get_register directly
         # Elsewhere we have to get the register via ptrace
-        if get_register == gdb79_get_register:
+        if pwndbg.gdblib.arch.current == "x86-64" and get_register == gdb79_get_register:
             return get_register(regname)
 
         # We can't really do anything if the process is remote.
@@ -209,7 +215,7 @@ class module(ModuleType):
 
         return 0
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "<module pwndbg.gdblib.regs>"
 
 
@@ -220,9 +226,9 @@ sys.modules[__name__] = module(__name__, "")
 
 @pwndbg.gdblib.events.cont
 @pwndbg.gdblib.events.stop
-def update_last():
-    M = sys.modules[__name__]
+def update_last() -> None:
+    M: module = sys.modules[__name__]
     M.previous = M.last
     M.last = {k: M[k] for k in M.common}
-    if pwndbg.config.show_retaddr_reg:
+    if pwndbg.gdblib.config.show_retaddr_reg:
         M.last.update({k: M[k] for k in M.retaddr})

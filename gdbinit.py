@@ -1,58 +1,43 @@
+import cProfile
 import glob
 import locale
+import os
 import sys
+import time
+from glob import glob
 from os import environ
 from os import path
 
-# Allow users to use packages from a virtualenv
-# That's not 100% supported, but they do it on their own,
-# so we will warn them if the GDB's Python is not virtualenv's Python
-virtual_env = environ.get("VIRTUAL_ENV")
+_profiler = cProfile.Profile()
 
-if virtual_env:
-    no_venv_warning = environ.get("PWNDBG_NO_VENV_WARNING", 0)
-    if not no_venv_warning and not sys.executable.startswith(virtual_env):
-        print("[!] Pwndbg Python virtualenv warning [!]")
-        print(
-            "Found Python virtual environment (VIRTUAL_ENV='%s') while GDB is built with a different Python binary (%s)"
-            % (virtual_env, sys.executable)
-        )
-        print("Assuming that you installed Pwndbg dependencies into the virtual environment")
-        print("If this is not true, this may cause import errors or other issues in Pwndbg")
-        print(
-            "If all works for you, you can suppress this warning by setting PWNDBG_NO_VENV_WARNING=1"
-        )
-        print("")
-
-        possible_site_packages = glob.glob(
-            path.join(virtual_env, "lib", "python*", "site-packages")
-        )
-        if len(possible_site_packages) > 1:
-            print("Found multiple site packages in virtualenv, using the last choice.")
-        virtualenv_site_packages = []
-        for site_packages in possible_site_packages:
-            virtualenv_site_packages = site_packages
-        if not virtualenv_site_packages:
-            print("Not found site-packages in virtualenv, guessing")
-            guessed_python_directory = "python%s.%s" % (
-                sys.version_info.major,
-                sys.version_info.minor,
-            )
-            virtualenv_site_packages = path.join(
-                virtual_env, "lib", guessed_python_directory, "site-packages"
-            )
-
-        print("Adding virtualenv's python site packages: %s to sys.path" % virtualenv_site_packages)
-        sys.path.append(virtualenv_site_packages)
-
+_start_time = None
+if environ.get("PWNDBG_PROFILE") == "1":
+    _start_time = time.time()
+    _profiler.enable()
 
 directory, file = path.split(__file__)
 directory = path.expanduser(directory)
 directory = path.abspath(directory)
 
+# Get virtualenv's site-packages path
+venv_path = os.environ.get("PWNDBG_VENV_PATH")
+if not venv_path:
+    venv_path = os.path.join(directory, ".venv")
 
+if not os.path.exists(venv_path):
+    print(f"Cannot find Pwndbg virtualenv directory: {venv_path}: please re-run setup.sh")
+    sys.exit(1)
+
+site_pkgs_path = glob(os.path.join(venv_path, "lib/*/site-packages"))[0]
+
+# Set virtualenv's bin path (needed for utility tools like ropper, pwntools etc)
+bin_path = os.path.join(venv_path, "bin")
+os.environ["PATH"] = bin_path + os.pathsep + os.environ.get("PATH")
+
+# Add gdb-pt-dump directory to sys.path so it can be imported
 gdbpt = path.join(directory, "gdb-pt-dump")
 sys.path.append(directory)
+sys.path.append(site_pkgs_path)
 sys.path.append(gdbpt)
 
 # warn if the user has different encoding than utf-8
@@ -60,16 +45,20 @@ encoding = locale.getpreferredencoding()
 
 if encoding != "UTF-8":
     print("******")
+    print(f"Your encoding ({encoding}) is different than UTF-8. pwndbg might not work properly.")
+    print("You might try launching GDB with:")
+    print("    LC_CTYPE=C.UTF-8 gdb")
     print(
-        "Your encoding ({}) is different than UTF-8. pwndbg might not work properly.".format(
-            encoding
-        )
+        "If that does not work, make sure that en_US.UTF-8 is uncommented in /etc/locale.gen and that you called `locale-gen` command"
     )
-    print("You might try launching gdb with:")
-    print("    LC_ALL=en_US.UTF-8 PYTHONIOENCODING=UTF-8 gdb")
-    print("Make sure that en_US.UTF-8 is activated in /etc/locale.gen and you called locale-gen")
     print("******")
 
 environ["PWNLIB_NOTERM"] = "1"
 
 import pwndbg  # noqa: F401
+import pwndbg.profiling
+
+pwndbg.profiling.init(_profiler, _start_time)
+if environ.get("PWNDBG_PROFILE") == "1":
+    pwndbg.profiling.profiler.stop("pwndbg-load.pstats")
+    pwndbg.profiling.profiler.start()

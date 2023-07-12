@@ -2,15 +2,12 @@ import string
 
 import pwndbg.auxv
 import pwndbg.commands
-import pwndbg.file
-import pwndbg.lib.memoize
-import pwndbg.net
-import pwndbg.proc
-
-try:
-    import psutil
-except Exception:
-    psutil = None
+import pwndbg.gdblib.file
+import pwndbg.gdblib.net
+import pwndbg.gdblib.proc
+import pwndbg.lib.cache
+from pwndbg.color import message
+from pwndbg.commands import CommandCategory
 
 """
 PEDA prints it out like this:
@@ -67,44 +64,40 @@ capabilities = {
 
 
 class Process:
-    def __init__(self, pid=None, tid=None):
+    def __init__(self, pid=None, tid=None) -> None:
         if pid is None:
-            pid = pwndbg.proc.pid
+            pid = pwndbg.gdblib.proc.pid
         if tid is None:
-            tid = pwndbg.proc.tid
+            tid = pwndbg.gdblib.proc.tid
         if not tid:
             tid = pid
         self.pid = pid
         self.tid = tid
 
-        # Precalculate
-        self.status
-
     @property
-    @pwndbg.lib.memoize.reset_on_stop
+    @pwndbg.lib.cache.cache_until("stop")
     def selinux(self):
         path = "/proc/%i/task/%i/attr/current" % (self.pid, self.tid)
-        raw = pwndbg.file.get(path)
+        raw = pwndbg.gdblib.file.get(path)
         return raw.decode().rstrip("\x00").strip()
 
     @property
-    @pwndbg.lib.memoize.reset_on_stop
+    @pwndbg.lib.cache.cache_until("stop")
     def status(self):
-        raw = pwndbg.file.get("/proc/%i/task/%i/status" % (self.pid, self.tid))
+        raw = pwndbg.gdblib.file.get("/proc/%i/task/%i/status" % (self.pid, self.tid))
 
         status = {}
         for line in raw.splitlines():
             if not line:
                 continue
 
-            k_v = line.split(None, 1)
+            k_v = line.split(maxsplit=1)
 
             if len(k_v) == 1:
                 k_v.append(b"")
 
             k, v = k_v
 
-            # Python3 ftw!
             k = k.decode("latin-1")
             v = v.decode("latin-1")
 
@@ -133,7 +126,7 @@ class Process:
 
             # capability sets
             if k in ["capeff", "capinh", "capprm", "capbnd"]:
-                orig = v
+                orig: int = v
                 v = []
                 for i in range(max(capabilities) + 1):
                     if (orig >> i) & 1 == 1:
@@ -144,12 +137,12 @@ class Process:
         return status
 
     @property
-    @pwndbg.lib.memoize.reset_on_stop
+    @pwndbg.lib.cache.cache_until("stop")
     def open_files(self):
         fds = {}
 
         for i in range(self.fdsize):
-            link = pwndbg.file.readlink("/proc/%i/fd/%i" % (pwndbg.proc.pid, i))
+            link = pwndbg.gdblib.file.readlink("/proc/%i/fd/%i" % (pwndbg.gdblib.proc.pid, i))
 
             if link:
                 fds[i] = link
@@ -157,7 +150,7 @@ class Process:
         return fds
 
     @property
-    @pwndbg.lib.memoize.reset_on_stop
+    @pwndbg.lib.cache.cache_until("stop")
     def connections(self):
         # Connections look something like this:
         # socket:[102422]
@@ -165,7 +158,7 @@ class Process:
         socket = "socket:["
         result = []
 
-        functions = [pwndbg.net.tcp, pwndbg.net.unix, pwndbg.net.netlink]
+        functions = [pwndbg.gdblib.net.tcp, pwndbg.gdblib.net.unix, pwndbg.gdblib.net.netlink]
 
         for fd, path in fds.items():
             if socket not in path:
@@ -183,23 +176,31 @@ class Process:
         return tuple(result)
 
 
-@pwndbg.commands.ArgparsedCommand("Gets the pid.")
+@pwndbg.commands.ArgparsedCommand(
+    "Gets the pid.", aliases=["getpid"], category=CommandCategory.PROCESS
+)
 @pwndbg.commands.OnlyWhenRunning
-def pid():
-    print(pwndbg.proc.pid)
+def pid() -> None:
+    print(pwndbg.gdblib.proc.pid)
 
 
-@pwndbg.commands.ArgparsedCommand("Display information about the running process.")
+@pwndbg.commands.ArgparsedCommand(
+    "Display information about the running process.", category=CommandCategory.PROCESS
+)
 @pwndbg.commands.OnlyWhenRunning
-def procinfo():
+def procinfo() -> None:
     """
     Display information about the running process.
     """
-    if not psutil:
-        print("psutil required but not installed")
-        return
-
-    exe = str(pwndbg.auxv.get()["AT_EXECFN"])
+    if pwndbg.gdblib.qemu.is_qemu():
+        print(
+            message.error(
+                "QEMU target detected: showing result for the qemu process"
+                " - so it will be a bit inaccurate (excessive for the parts"
+                " used directly by the qemu process)"
+            )
+        )
+    exe = pwndbg.auxv.get()["AT_EXECFN"]
     print("%-10s %r" % ("exe", exe))
 
     proc = Process()

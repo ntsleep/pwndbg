@@ -4,7 +4,7 @@ set -ex
 # If we are a root in a container and `sudo` doesn't exist
 # lets overwrite it with a function that just executes things passed to sudo
 # (yeah it won't work for sudo executed with flags)
-if ! hash sudo 2>/dev/null && whoami | grep root; then
+if ! hash sudo 2> /dev/null && whoami | grep root; then
     sudo() {
         ${*}
     }
@@ -12,20 +12,20 @@ fi
 
 # Helper functions
 linux() {
-    uname | grep -i Linux &>/dev/null
+    uname | grep -i Linux &> /dev/null
 }
 osx() {
-    uname | grep -i Darwin &>/dev/null
+    uname | grep -i Darwin &> /dev/null
 }
 
 install_apt() {
     sudo apt-get update || true
-    sudo apt-get install -y git gdb python3-dev python3-pip python3-setuptools libglib2.0-dev libc6-dbg
+    sudo apt-get install -y git gdb gdbserver python3-dev python3-venv python3-pip python3-setuptools libglib2.0-dev libc6-dbg
 
-    if uname -m | grep x86_64 >/dev/null; then
+    if uname -m | grep x86_64 > /dev/null; then
         sudo dpkg --add-architecture i386 || true
         sudo apt-get update || true
-        sudo apt-get install -y libc6-dbg:i386 || true
+        sudo apt-get install -y libc6-dbg:i386 libgcc-s1:i386 || true
     fi
 }
 
@@ -51,7 +51,7 @@ install_zypper() {
     sudo zypper refresh || true
     sudo zypper install -y gdb gdbserver python-devel python3-devel python2-pip python3-pip glib2-devel make glibc-debuginfo
 
-    if uname -m | grep x86_64 >/dev/null; then
+    if uname -m | grep x86_64 > /dev/null; then
         sudo zypper install -y glibc-32bit-debuginfo || true
     fi
 }
@@ -60,13 +60,50 @@ install_emerge() {
     emerge --oneshot --deep --newuse --changed-use --changed-deps dev-lang/python dev-python/pip sys-devel/gdb
 }
 
-PYTHON=''
-INSTALLFLAGS=''
+install_pacman() {
+    sudo pacman -Syy --noconfirm || true
+    sudo pacman -S --noconfirm git gdb python python-pip python-capstone python-unicorn python-pycparser python-psutil python-ptrace python-pyelftools python-six python-pygments which debuginfod
+    if ! grep -q "^set debuginfod enabled on" ~/.gdbinit; then
+        echo "set debuginfod enabled on" >> ~/.gdbinit
+    fi
+}
 
-if osx || [ "$1" == "--user" ]; then
-    INSTALLFLAGS="--user"
-else
-    PYTHON="sudo "
+usage() {
+    echo "Usage: $0 [--update]"
+    echo "  --update: Install/update dependencies without checking ~/.gdbinit"
+}
+
+UPDATE_MODE=
+for arg in "$@"; do
+    case $arg in
+        --update)
+            UPDATE_MODE=1
+            ;;
+        -h | --help)
+            set +x
+            usage
+            exit 0
+            ;;
+        *)
+            set +x
+            echo "Unknown argument: $arg"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+PYTHON=''
+
+# Check for the presence of the initializer line in the user's ~/.gdbinit file
+if [ -z "$UPDATE_MODE" ] && grep -q '^[^#]*source.*pwndbg/gdbinit.py' ~/.gdbinit; then
+    # Ask the user if they want to proceed and override the initializer line
+    read -p "An initializer line was found in your ~/.gdbinit file. Do you want to proceed and override it? (y/n) " answer
+
+    # If the user does not want to proceed, exit the script
+    if [[ "$answer" != "y" ]]; then
+        exit 0
+    fi
 fi
 
 if linux; then
@@ -82,34 +119,20 @@ if linux; then
         "clear-linux-os")
             install_swupd
             ;;
-        "opensuse-leap")
+        "opensuse-leap" | "opensuse-tumbleweed")
             install_zypper
             ;;
-        "arch")
-            echo "Install Arch linux using a community package. See:"
-            echo " - https://www.archlinux.org/packages/community/any/pwndbg/"
-            echo " - https://aur.archlinux.org/packages/pwndbg-git/"
-            exit 1
-            ;;
-        "endeavouros")
-            echo "Install pwndbg using a community package. See:"
-            echo " - https://www.archlinux.org/packages/community/any/pwndbg/"
-            echo " - https://aur.archlinux.org/packages/pwndbg-git/"
-            exit 1
-            ;;
-        "manjaro")
-            echo "Pwndbg is not available on Manjaro's repositories."
-            echo "But it can be installed using Arch's AUR community package. See:"
-            echo " - https://www.archlinux.org/packages/community/any/pwndbg/"
-            echo " - https://aur.archlinux.org/packages/pwndbg-git/"
-            exit 1
+        "arch" | "archarm" | "endeavouros" | "manjaro" | "garuda")
+            install_pacman
+            echo "Logging off and in or conducting a power cycle is required to get debuginfod to work."
+            echo "Alternatively you can manually set the environment variable: DEBUGINFOD_URLS=https://debuginfod.archlinux.org"
             ;;
         "void")
             install_xbps
             ;;
         "gentoo")
             install_emerge
-            if ! hash sudo 2>/dev/null && whoami | grep root; then
+            if ! hash sudo 2> /dev/null && whoami | grep root; then
                 sudo() {
                     ${*}
                 }
@@ -122,7 +145,7 @@ if linux; then
             elif hash dnf; then
                 install_dnf
             else
-                echo "\"$distro\" is not supported and your distro don't have apt or dnf that we support currently."
+                echo "\"$distro\" is not supported and your distro don't have a package manager that we support currently."
                 exit
             fi
             ;;
@@ -144,25 +167,32 @@ if ! osx; then
     PYTHON+="${PYVER}"
 fi
 
-# Find the Python site-packages that we need to use so that
-# GDB can find the files once we've installed them.
-if linux && [ -z "$INSTALLFLAGS" ]; then
-    SITE_PACKAGES=$(gdb -batch -q --nx -ex 'pi import site; print(site.getsitepackages()[0])')
-    INSTALLFLAGS="--target ${SITE_PACKAGES}"
+# Create Python virtualenv
+if [[ -z "${PWNDBG_VENV_PATH}" ]]; then
+    PWNDBG_VENV_PATH="./.venv"
 fi
+echo "Creating virtualenv in path: ${PWNDBG_VENV_PATH}"
 
-# Make sure that pip is available
-if ! ${PYTHON} -m pip -V; then
-    ${PYTHON} -m ensurepip ${INSTALLFLAGS} --upgrade
-fi
+${PYTHON} -m venv -- ${PWNDBG_VENV_PATH}
+PYTHON=${PWNDBG_VENV_PATH}/bin/python
 
 # Upgrade pip itself
-${PYTHON} -m pip install ${INSTALLFLAGS} --upgrade pip
+${PYTHON} -m pip install --upgrade pip
 
-# Install Python dependencies
-${PYTHON} -m pip install ${INSTALLFLAGS} -Ur requirements.txt
+# Create Python virtual environment and install dependencies in it
+${PWNDBG_VENV_PATH}/bin/pip install -Ur ./requirements.txt
 
-# Load Pwndbg into GDB on every launch.
-if ! grep pwndbg ~/.gdbinit &>/dev/null; then
-    echo "source $PWD/gdbinit.py" >>~/.gdbinit
+if [ -z "$UPDATE_MODE" ]; then
+    # Comment old configs out
+    if grep -q '^[^#]*source.*pwndbg/gdbinit.py' ~/.gdbinit; then
+        if ! osx; then
+            sed -i '/^[^#]*source.*pwndbg\/gdbinit.py/ s/^/# /' ~/.gdbinit
+        else
+            # In BSD sed we need to pass ' ' to indicate that no backup file should be created
+            sed -i ' ' '/^[^#]*source.*pwndbg\/gdbinit.py/ s/^/# /' ~/.gdbinit
+        fi
+    fi
+
+    # Load Pwndbg into GDB on every launch.
+    echo "source $PWD/gdbinit.py" >> ~/.gdbinit
 fi

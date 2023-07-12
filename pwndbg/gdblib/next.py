@@ -10,8 +10,8 @@ import gdb
 
 import pwndbg.disasm
 import pwndbg.gdblib.events
+import pwndbg.gdblib.proc
 import pwndbg.gdblib.regs
-import pwndbg.proc
 from pwndbg.color import message
 
 jumps = set((capstone.CS_GRP_CALL, capstone.CS_GRP_JUMP, capstone.CS_GRP_RET, capstone.CS_GRP_IRET))
@@ -19,16 +19,12 @@ jumps = set((capstone.CS_GRP_CALL, capstone.CS_GRP_JUMP, capstone.CS_GRP_RET, ca
 interrupts = set((capstone.CS_GRP_INT,))
 
 
-@pwndbg.gdblib.events.exit
-def clear_temp_breaks():
-    if not pwndbg.proc.alive:
-        breakpoints = gdb.breakpoints()
-        if breakpoints:
-            for bp in breakpoints:
-                if (
-                    bp.temporary and not bp.visible
-                ):  # visible is used instead of internal because older gdb's don't support internal
-                    bp.delete()
+def clear_temp_breaks() -> None:
+    if not pwndbg.gdblib.proc.alive:
+        for bp in gdb.breakpoints():
+            # visible is used instead of internal because older gdb's don't support internal
+            if bp.temporary and not bp.visible:
+                bp.delete()
 
 
 def next_int(address=None):
@@ -90,7 +86,11 @@ def break_next_interrupt(address=None):
 
 
 def break_next_call(symbol_regex=None):
-    while pwndbg.proc.alive:
+    while pwndbg.gdblib.proc.alive:
+        # Break on signal as it may be a segfault
+        if pwndbg.gdblib.proc.stopped_with_signal:
+            return
+
         ins = break_next_branch()
 
         if not ins:
@@ -105,16 +105,20 @@ def break_next_call(symbol_regex=None):
             return ins
 
         # return call if we match target address
-        if ins.target_const and re.match("%s$" % symbol_regex, hex(ins.target)):
+        if ins.target_const and re.match(f"{symbol_regex}$", hex(ins.target)):
             return ins
 
         # return call if we match symbol name
-        if ins.symbol and re.match("%s$" % symbol_regex, ins.symbol):
+        if ins.symbol and re.match(f"{symbol_regex}$", ins.symbol):
             return ins
 
 
 def break_next_ret(address=None):
-    while pwndbg.proc.alive:
+    while pwndbg.gdblib.proc.alive:
+        # Break on signal as it may be a segfault
+        if pwndbg.gdblib.proc.stopped_with_signal:
+            return
+
         ins = break_next_branch(address)
 
         if not ins:
@@ -124,30 +128,41 @@ def break_next_ret(address=None):
             return ins
 
 
-def break_on_program_code():
+def break_on_program_code() -> bool:
     """
-    Breaks on next instruction that belongs to process' objfile code.
-    :return: True for success, False when process ended or when pc is at the code.
+    Breaks on next instruction that belongs to process' objfile code
+
+    :return: True for success, False when process ended or when pc is not at the code or if a signal occurred
     """
-    mp = pwndbg.proc.mem_page
-    start = mp.start
-    end = mp.end
+    exe = pwndbg.gdblib.proc.exe
+    binary_exec_page_ranges = tuple(
+        (p.start, p.end) for p in pwndbg.gdblib.vmmap.get() if p.objfile == exe and p.execute
+    )
 
-    if start <= pwndbg.gdblib.regs.pc < end:
-        print(message.error("The pc is already at the binary objfile code. Not stepping."))
-        return False
+    pc = pwndbg.gdblib.regs.pc
+    for start, end in binary_exec_page_ranges:
+        if start <= pc < end:
+            print(message.error("The pc is already at the binary objfile code. Not stepping."))
+            return False
 
-    while pwndbg.proc.alive:
-        gdb.execute("si", from_tty=False, to_string=False)
+    proc = pwndbg.gdblib.proc
+    regs = pwndbg.gdblib.regs
 
-        addr = pwndbg.gdblib.regs.pc
-        if start <= addr < end:
-            return True
+    while proc.alive:
+        # Break on signal as it may be a segfault
+        if proc.stopped_with_signal:
+            return False
+
+        o = gdb.execute("si", from_tty=False, to_string=True)
+
+        for start, end in binary_exec_page_ranges:
+            if start <= regs.pc < end:
+                return True
 
     return False
 
 
-def break_on_next(address=None):
+def break_on_next(address=None) -> None:
     address = address or pwndbg.gdblib.regs.pc
     ins = pwndbg.disasm.one(address)
 

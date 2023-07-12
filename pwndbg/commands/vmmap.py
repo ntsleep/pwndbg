@@ -9,8 +9,9 @@ from elftools.elf.elffile import ELFFile
 
 import pwndbg.color.memory as M
 import pwndbg.commands
-import pwndbg.elf
-import pwndbg.vmmap
+import pwndbg.gdblib.elf
+import pwndbg.gdblib.vmmap
+from pwndbg.commands import CommandCategory
 
 integer_types = (int, gdb.Value)
 
@@ -30,8 +31,18 @@ def pages_filter(gdbval_or_str):
         raise argparse.ArgumentTypeError("Unknown vmmap argument type.")
 
 
-parser = argparse.ArgumentParser()
-parser.description = """Print virtual memory map pages. Results can be filtered by providing address/module name.
+def print_vmmap_table_header() -> None:
+    """
+    Prints the table header for the vmmap command.
+    """
+    print(
+        f"{'Start':>{2 + 2 * pwndbg.gdblib.arch.ptrsize}} {'End':>{2 + 2 * pwndbg.gdblib.arch.ptrsize}} {'Perm'} {'Size':>8} {'Offset':>6} {'File'}"
+    )
+
+
+parser = argparse.ArgumentParser(
+    formatter_class=argparse.RawTextHelpFormatter,
+    description="""Print virtual memory map pages.
 
 Unnamed mappings are named as [anon_%#x] where %#x is high part of their start address. This is useful for filtering with `vmmap` or `search` commands.
 
@@ -46,23 +57,25 @@ As a last resort, we sometimes try to explore the addresses in CPU registers and
 
 Memory pages can also be added manually with the use of vmmap_add, vmmap_clear and vmmap_load commands. This may be useful for bare metal debugging.
 
-[0] https://lore.kernel.org/all/20220221030910.3203063-1-dominik.b.czarnota@gmail.com/"""
-parser.formatter_class = argparse.RawDescriptionHelpFormatter
+[0] https://lore.kernel.org/all/20220221030910.3203063-1-dominik.b.czarnota@gmail.com/""",
+)
 parser.add_argument(
     "gdbval_or_str",
     type=pwndbg.commands.sloppy_gdb_parse,
     nargs="?",
     default=None,
-    help="Address or module name.",
+    help="Address or module name filter",
 )
 parser.add_argument("-w", "--writable", action="store_true", help="Display writable maps only")
 parser.add_argument("-x", "--executable", action="store_true", help="Display executable maps only")
 
 
-@pwndbg.commands.ArgparsedCommand(parser, aliases=["lm", "address", "vprot"])
+@pwndbg.commands.ArgparsedCommand(
+    parser, aliases=["lm", "address", "vprot", "libs"], category=CommandCategory.MEMORY
+)
 @pwndbg.commands.OnlyWhenRunning
-def vmmap(gdbval_or_str=None, writable=False, executable=False):
-    pages = pwndbg.vmmap.get()
+def vmmap(gdbval_or_str=None, writable=False, executable=False) -> None:
+    pages = pwndbg.gdblib.vmmap.get()
 
     if gdbval_or_str:
         pages = list(filter(pages_filter(gdbval_or_str), pages))
@@ -72,7 +85,7 @@ def vmmap(gdbval_or_str=None, writable=False, executable=False):
         return
 
     print(M.legend())
-
+    print_vmmap_table_header()
     if len(pages) == 1 and isinstance(gdbval_or_str, integer_types):
         page = pages[0]
         print(M.get(page.vaddr, text=str(page) + " +0x%x" % (int(gdbval_or_str) - page.vaddr)))
@@ -86,8 +99,7 @@ def vmmap(gdbval_or_str=None, writable=False, executable=False):
         print("\n[QEMU target detected - vmmap result might not be accurate; see `help vmmap`]")
 
 
-parser = argparse.ArgumentParser()
-parser.description = "Add Print virtual memory map page."
+parser = argparse.ArgumentParser(description="Add virtual memory map page.")
 parser.add_argument("start", help="Starting virtual address")
 parser.add_argument("size", help="Size of the address space, in bytes")
 parser.add_argument(
@@ -101,12 +113,13 @@ parser.add_argument(
 )
 
 
-@pwndbg.commands.ArgparsedCommand(parser)
-def vmmap_add(start, size, flags, offset):
+@pwndbg.commands.ArgparsedCommand(parser, category=CommandCategory.MEMORY)
+@pwndbg.commands.OnlyWhenRunning
+def vmmap_add(start, size, flags, offset) -> None:
     page_flags = {
-        "r": pwndbg.elf.PF_R,
-        "w": pwndbg.elf.PF_W,
-        "x": pwndbg.elf.PF_X,
+        "r": pwndbg.gdblib.elf.PF_R,
+        "w": pwndbg.gdblib.elf.PF_W,
+        "x": pwndbg.gdblib.elf.PF_X,
     }
     perm = 0
     for flag in flags:
@@ -117,29 +130,32 @@ def vmmap_add(start, size, flags, offset):
         perm |= flag_val
 
     page = pwndbg.lib.memory.Page(start, size, perm, offset)
-    pwndbg.vmmap.add_custom_page(page)
+    pwndbg.gdblib.vmmap.add_custom_page(page)
 
     print("%r added" % page)
 
 
-@pwndbg.commands.ArgparsedCommand("Clear the vmmap cache.")  # TODO is this accurate?
-def vmmap_clear():
-    pwndbg.vmmap.clear_custom_page()
+@pwndbg.commands.ArgparsedCommand(
+    "Clear the vmmap cache.", category=CommandCategory.MEMORY
+)  # TODO is this accurate?
+@pwndbg.commands.OnlyWhenRunning
+def vmmap_clear() -> None:
+    pwndbg.gdblib.vmmap.clear_custom_page()
 
 
-parser = argparse.ArgumentParser()
-parser.description = "Load virtual memory map pages from ELF file."
+parser = argparse.ArgumentParser(description="Load virtual memory map pages from ELF file.")
 parser.add_argument(
     "filename", nargs="?", type=str, help="ELF filename, by default uses current loaded filename."
 )
 
 
-@pwndbg.commands.ArgparsedCommand(parser)
-def vmmap_load(filename):
+@pwndbg.commands.ArgparsedCommand(parser, category=CommandCategory.MEMORY)
+@pwndbg.commands.OnlyWhenRunning
+def vmmap_load(filename) -> None:
     if filename is None:
-        filename = pwndbg.file.get_file(pwndbg.proc.exe)
+        filename = pwndbg.gdblib.file.get_proc_exe_file()
 
-    print('Load "%s" ...' % filename)
+    print(f'Load "{filename}" ...')
 
     # TODO: Add an argument to let use to choose loading the page information from sections or segments
 
@@ -163,15 +179,15 @@ def vmmap_load(filename):
                 continue
 
             # Guess the segment flags from section flags
-            flags = pwndbg.elf.PF_R
+            flags = pwndbg.gdblib.elf.PF_R
             if sh_flags & SH_FLAGS.SHF_WRITE:
-                flags |= pwndbg.elf.PF_W
+                flags |= pwndbg.gdblib.elf.PF_W
             if sh_flags & SH_FLAGS.SHF_EXECINSTR:
-                flags |= pwndbg.elf.PF_X
+                flags |= pwndbg.gdblib.elf.PF_X
 
             page = pwndbg.lib.memory.Page(vaddr, memsz, flags, offset, filename)
             pages.append(page)
 
     for page in pages:
-        pwndbg.vmmap.add_custom_page(page)
+        pwndbg.gdblib.vmmap.add_custom_page(page)
         print("%r added" % page)

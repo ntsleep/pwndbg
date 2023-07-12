@@ -1,4 +1,4 @@
-# This dockerfile was created for development & testing purposes
+# This dockerfile was created for development & testing purposes, for APT-based distro.
 #
 # Build as:             docker build -t pwndbg .
 #
@@ -7,13 +7,16 @@
 # For development, mount the directory so the host changes are reflected into container:
 #   docker run -it --cap-add=SYS_PTRACE --security-opt seccomp=unconfined -v `pwd`:/pwndbg pwndbg bash
 #
-FROM ubuntu:20.04
+
+ARG image=ubuntu:20.04
+FROM $image
 
 WORKDIR /pwndbg
 
 ENV LANG en_US.utf8
 ENV TZ=America/New_York
 ENV ZIGPATH=/opt/zig
+ENV PWNDBG_VENV_PATH=/venv
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
     echo $TZ > /etc/timezone && \
@@ -33,13 +36,10 @@ RUN sed -i "s/^git submodule/#git submodule/" ./setup.sh && \
     DEBIAN_FRONTEND=noninteractive ./setup.sh
 
 # Comment these lines if you won't run the tests.
-ADD ./setup-test-tools.sh /pwndbg/
-RUN ./setup-test-tools.sh
+ADD ./setup-dev.sh /pwndbg/
+RUN ./setup-dev.sh
 
-RUN echo "source /pwndbg/gdbinit.py" >> ~/.gdbinit.py && \
-    echo "PYTHON_MINOR=$(python3 -c "import sys;print(sys.version_info.minor)")" >> /root/.bashrc && \
-    echo "PYTHON_PATH=\"/usr/local/lib/python3.${PYTHON_MINOR}/dist-packages/bin\"" >> /root/.bashrc && \
-    echo "export PATH=$PATH:$PYTHON_PATH" >> /root/.bashrc
+RUN echo "source /pwndbg/gdbinit.py" >> ~/.gdbinit.py
 
 ADD . /pwndbg/
 

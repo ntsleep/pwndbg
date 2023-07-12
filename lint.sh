@@ -28,15 +28,40 @@ done
 
 set -o xtrace
 
-if [[ $FORMAT == 1 ]]; then
-    isort .
-    black .
-else
-    isort --check-only --diff .
-    black --check --diff .
+LINT_FILES="pwndbg tests *.py"
+LINT_TOOLS="isort black ruff vermin"
+
+if ! type ${LINT_TOOLS} &> /dev/null; then
+    PIP_CMD="pip install -Ur dev-requirements.txt"
+    echo "Missing one of the following tools: ${LINT_TOOLS}"
+    echo "Running '${PIP_CMD}'"
+
+    $PIP_CMD
 fi
 
-flake8 --show-source .
+if [[ $FORMAT == 1 ]]; then
+    isort ${LINT_FILES}
+    black ${LINT_FILES}
+else
+    isort --check-only --diff ${LINT_FILES}
+    black --check --diff ${LINT_FILES}
+fi
 
-# Indents are four spaces, binary ops can start a line, and indent switch cases
-shfmt -i 4 -bn -ci -d .
+if [ -x "$(command -v shfmt)" ]; then
+    # Indents are four spaces, binary ops can start a line, indent switch cases,
+    # and allow spaces following a redirect
+    shfmt -i 4 -bn -ci -sr -d .
+else
+    echo "shfmt not installed, skipping"
+fi
+
+# Checking minimum python version
+vermin -vvv --no-tips -q -t=3.6 --violations ./pwndbg/
+
+ruff check --show-source ${LINT_FILES}
+
+if [ -x "$(command -v mypy)" ]; then
+    mypy pwndbg
+else
+    echo "mypy not installed, skipping"
+fi

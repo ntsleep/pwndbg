@@ -3,20 +3,22 @@ import binascii
 import codecs
 import os
 import struct
+from typing import Set
 
 import pwndbg.color.memory as M
 import pwndbg.commands
-import pwndbg.config
 import pwndbg.enhance
 import pwndbg.gdblib.arch
+import pwndbg.gdblib.config
+import pwndbg.gdblib.vmmap
 import pwndbg.search
-import pwndbg.vmmap
 from pwndbg.color import message
+from pwndbg.commands import CommandCategory
 
-saved = set()
+saved: Set[int] = set()
 
 
-def print_search_hit(address):
+def print_search_hit(address) -> None:
     """Prints out a single search hit.
 
     Arguments:
@@ -25,7 +27,7 @@ def print_search_hit(address):
     if not address:
         return
 
-    vmmap = pwndbg.vmmap.find(address)
+    vmmap = pwndbg.gdblib.vmmap.find(address)
     if vmmap:
         region = os.path.basename(vmmap.objfile)
     else:
@@ -39,14 +41,12 @@ def print_search_hit(address):
     print(region, addr, display)
 
 
-auto_save = pwndbg.config.Parameter(
+auto_save = pwndbg.gdblib.config.add_param(
     "auto-save-search", False, 'automatically pass --save to "search" command'
 )
 
 parser = argparse.ArgumentParser(
-    description="""
-Search memory for byte sequences, strings, pointers, and integer values
-"""
+    description="Search memory for byte sequences, strings, pointers, and integer values."
 )
 parser.add_argument(
     "-t",
@@ -100,7 +100,6 @@ parser.add_argument(
 parser.add_argument(
     "-x", "--hex", action="store_true", help="Target is a hex-encoded (for bytes/strings)"
 )
-parser.add_argument("-s", "--string", action="store_true", help="Target is a raw string")
 parser.add_argument(
     "-e", "--executable", action="store_true", help="Search executable segments only"
 )
@@ -113,7 +112,8 @@ parser.add_argument(
     "--save",
     action="store_true",
     default=None,
-    help="Save results for --resume.  Default comes from config %r" % auto_save.name,
+    help="Save results for further searches with --next. Default comes from config %r"
+    % auto_save.name,
 )
 parser.add_argument(
     "--no-save", action="store_false", default=None, dest="save", help="Invert --save"
@@ -129,9 +129,9 @@ parser.add_argument(
 )
 
 
-@pwndbg.commands.ArgparsedCommand(parser)
+@pwndbg.commands.ArgparsedCommand(parser, category=CommandCategory.MEMORY)
 @pwndbg.commands.OnlyWhenRunning
-def search(type, hex, string, executable, writable, value, mapping_name, save, next, trunc_out):
+def search(type, hex, executable, writable, value, mapping_name, save, next, trunc_out) -> None:
     global saved
     if next and not saved:
         print(
@@ -145,13 +145,13 @@ def search(type, hex, string, executable, writable, value, mapping_name, save, n
         type = {4: "dword", 8: "qword"}[pwndbg.gdblib.arch.ptrsize]
 
     if save is None:
-        save = bool(pwndbg.config.auto_save_search)
+        save = bool(pwndbg.gdblib.config.auto_save_search)
 
     if hex:
         try:
             value = codecs.decode(value, "hex")
         except binascii.Error as e:
-            print("invalid input for type hex: {}".format(e))
+            print(f"invalid input for type hex: {e}")
             return
 
     # Convert to an integer if needed, and pack to bytes
@@ -169,7 +169,7 @@ def search(type, hex, string, executable, writable, value, mapping_name, save, n
         try:
             value = struct.pack(fmt, value)
         except struct.error as e:
-            print("invalid input for type {}: {}".format(type, e))
+            print(f"invalid input for type {type}: {e}")
             return
 
     # Null-terminate strings
@@ -178,7 +178,7 @@ def search(type, hex, string, executable, writable, value, mapping_name, save, n
         value += b"\x00"
 
     # Find the mappings that we're looking for
-    mappings = pwndbg.vmmap.get()
+    mappings = pwndbg.gdblib.vmmap.get()
 
     if mapping_name:
         mappings = [m for m in mappings if mapping_name in m.objfile]
@@ -218,7 +218,6 @@ def search(type, hex, string, executable, writable, value, mapping_name, save, n
     for address in pwndbg.search.search(
         value, mappings=mappings, executable=executable, writable=writable
     ):
-
         if save:
             saved.add(address)
 

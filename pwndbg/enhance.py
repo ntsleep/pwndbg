@@ -9,26 +9,26 @@ supplemental information sources (e.g. active IDA Pro connection).
 
 import string
 
-import pwndbg.color as color
 import pwndbg.color.enhance as E
-import pwndbg.config
 import pwndbg.disasm
 import pwndbg.gdblib.arch
+import pwndbg.gdblib.config
 import pwndbg.gdblib.memory
 import pwndbg.gdblib.strings
+import pwndbg.gdblib.symbol
 import pwndbg.gdblib.typeinfo
-import pwndbg.lib.memoize
-import pwndbg.symbol
+import pwndbg.lib.cache
+from pwndbg import color
 from pwndbg.color.syntax_highlight import syntax_highlight
 
 bad_instrs = [".byte", ".long", "rex.R", "rex.XB", ".inst", "(bad)"]
 
 
-def good_instr(i):
+def good_instr(i) -> bool:
     return not any(bad in i for bad in bad_instrs)
 
 
-def int_str(value):
+def int_str(value: int) -> str:
     retval = "%#x" % int(value & pwndbg.gdblib.arch.ptrmask)
 
     # Try to unpack the value as a string
@@ -40,8 +40,8 @@ def int_str(value):
     return retval
 
 
-# @pwndbg.lib.memoize.reset_on_stop
-def enhance(value, code=True, safe_linking=False):
+# @pwndbg.lib.cache.cache_until("stop")
+def enhance(value: int, code: bool = True, safe_linking: bool = False) -> str:
     """
     Given the last pointer in a chain, attempt to characterize
 
@@ -59,8 +59,8 @@ def enhance(value, code=True, safe_linking=False):
     """
     value = int(value)
 
-    name = pwndbg.symbol.get(value) or None
-    page = pwndbg.vmmap.find(value)
+    name = pwndbg.gdblib.symbol.get(value) or None
+    page = pwndbg.gdblib.vmmap.find(value)
 
     # If it's not in a page we know about, try to dereference
     # it anyway just to test.
@@ -89,8 +89,8 @@ def enhance(value, code=True, safe_linking=False):
     if exe:
         instr = pwndbg.disasm.one(value)
         if instr:
-            instr = "%-6s %s" % (instr.mnemonic, instr.op_str)
-            if pwndbg.config.syntax_highlight:
+            instr = f"{instr.mnemonic} {instr.op_str}"
+            if pwndbg.gdblib.config.syntax_highlight:
                 instr = syntax_highlight(instr)
 
     szval = pwndbg.gdblib.strings.get(value) or None
@@ -154,4 +154,4 @@ def enhance(value, code=True, safe_linking=False):
     if len(retval) == 1:
         return retval[0]
 
-    return retval[0] + E.comment(color.strip(" /* {} */".format("; ".join(retval[1:]))))
+    return retval[0] + E.comment(color.strip(f" /* {'; '.join(retval[1:])} */"))

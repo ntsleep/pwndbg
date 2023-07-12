@@ -4,9 +4,10 @@ import os
 import gdb
 
 import pwndbg.auxv
-import pwndbg.color.message as message
 import pwndbg.commands
-import pwndbg.vmmap
+import pwndbg.gdblib.vmmap
+from pwndbg.color import message
+from pwndbg.commands import CommandCategory
 
 
 def get_exe_name():
@@ -26,7 +27,7 @@ def get_exe_name():
     # On the other hand, the vmmap, if taken from /proc/pid/maps will contain
     # the absolute and real path of the binary (after symlinks).
     # And so we have to read this path here.
-    real_path = pwndbg.file.readlink(path)
+    real_path = pwndbg.gdblib.file.readlink(path)
 
     if real_path == "":  # the `path` was not a symlink
         real_path = path
@@ -37,12 +38,12 @@ def get_exe_name():
         # We want just 'a.out'
         return os.path.normpath(real_path)
 
-    return pwndbg.proc.exe
+    return pwndbg.gdblib.proc.exe
 
 
 def translate_addr(offset, module):
     mod_filter = lambda page: module in page.objfile
-    pages = list(filter(mod_filter, pwndbg.vmmap.get()))
+    pages = list(filter(mod_filter, pwndbg.gdblib.vmmap.get()))
 
     if not pages:
         print(
@@ -67,8 +68,7 @@ def translate_addr(offset, module):
     return addr
 
 
-parser = argparse.ArgumentParser()
-parser.description = "Calculate VA of RVA from PIE base."
+parser = argparse.ArgumentParser(description="Calculate VA of RVA from PIE base.")
 parser.add_argument("offset", nargs="?", default=0, help="Offset from PIE base.")
 parser.add_argument(
     "module",
@@ -79,12 +79,12 @@ parser.add_argument(
 )
 
 
-@pwndbg.commands.ArgparsedCommand(parser)
+@pwndbg.commands.ArgparsedCommand(parser, category=CommandCategory.LINUX)
 @pwndbg.commands.OnlyWhenRunning
-def piebase(offset=None, module=None):
+def piebase(offset=None, module=None) -> None:
     offset = int(offset)
     if not module:
-        # Note: we do not use `pwndbg.file.get_file(module)` here as it is not needed.
+        # Note: we do not use `pwndbg.gdblib.file.get_file(module)` here as it is not needed.
         # (as we do need the actual path that is in vmmap, not the file itself)
         module = get_exe_name()
 
@@ -108,12 +108,12 @@ parser.add_argument(
 )
 
 
-@pwndbg.commands.ArgparsedCommand(parser, aliases=["brva"])
+@pwndbg.commands.ArgparsedCommand(parser, aliases=["brva"], category=CommandCategory.BREAKPOINT)
 @pwndbg.commands.OnlyWhenRunning
-def breakrva(offset=0, module=None):
+def breakrva(offset=0, module=None) -> None:
     offset = int(offset)
     if not module:
-        # Note: we do not use `pwndbg.file.get_file(module)` here as it is not needed.
+        # Note: we do not use `pwndbg.gdblib.file.get_file(module)` here as it is not needed.
         # (as we do need the actual path that is in vmmap, not the file itself)
         module = get_exe_name()
     addr = translate_addr(offset, module)

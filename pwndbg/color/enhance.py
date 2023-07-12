@@ -1,17 +1,17 @@
-import pwndbg.color.theme as theme
-import pwndbg.config as config
 from pwndbg.color import generateColorFunction
+from pwndbg.color import theme
+from pwndbg.gdblib import config
 
-config_integer_color = theme.ColoredParameter(
+config_integer_color = theme.add_color_param(
     "enhance-integer-value-color", "none", "color of value enhance (integer)"
 )
-config_string_color = theme.ColoredParameter(
+config_string_color = theme.add_color_param(
     "enhance-string-value-color", "none", "color of value enhance (string)"
 )
-config_comment_color = theme.ColoredParameter(
+config_comment_color = theme.add_color_param(
     "enhance-comment-color", "none", "color of value enhance (comment)"
 )
-config_unknown_color = theme.ColoredParameter(
+config_unknown_color = theme.add_color_param(
     "enhance-unknown-color", "none", "color of value enhance (unknown value)"
 )
 

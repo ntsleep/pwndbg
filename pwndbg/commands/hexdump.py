@@ -3,23 +3,26 @@ import argparse
 import gdb
 
 import pwndbg.commands
-import pwndbg.config
 import pwndbg.gdblib.arch
+import pwndbg.gdblib.config
 import pwndbg.gdblib.memory
 import pwndbg.gdblib.regs
 import pwndbg.hexdump
+from pwndbg.color import message
+from pwndbg.commands import CommandCategory
 
-pwndbg.config.Parameter("hexdump-width", 16, "line width of hexdump command")
-pwndbg.config.Parameter("hexdump-bytes", 64, "number of bytes printed by hexdump command")
-pwndbg.config.Parameter(
+pwndbg.gdblib.config.add_param("hexdump-width", 16, "line width of hexdump command")
+pwndbg.gdblib.config.add_param("hexdump-bytes", 64, "number of bytes printed by hexdump command")
+pwndbg.gdblib.config.add_param(
     "hexdump-group-width",
-    4,
+    -1,
     "number of bytes grouped in hexdump command (If -1, the architecture's pointer size is used)",
 )
-pwndbg.config.Parameter(
+pwndbg.gdblib.config.add_param(
     "hexdump-group-use-big-endian",
     False,
-    "Use big-endian within each group of bytes. Only applies to raw bytes, not the ASCII part. "
+    "whether to use big-endian within each group of bytes in hexdump command",
+    help_docstring="When `on`, use big-endian within each group of bytes. Only applies to raw bytes, not the ASCII part. "
     "See also hexdump-highlight-group-lsb.",
 )
 
@@ -28,11 +31,11 @@ def address_or_module_name(s):
     gdbval_or_str = pwndbg.commands.sloppy_gdb_parse(s)
     if isinstance(gdbval_or_str, str):
         module_name = gdbval_or_str
-        pages = list(filter(lambda page: module_name in page.objfile, pwndbg.vmmap.get()))
+        pages = list(filter(lambda page: module_name in page.objfile, pwndbg.gdblib.vmmap.get()))
         if pages:
             return pages[0].vaddr
         else:
-            raise argparse.ArgumentError("Could not find pages for module %s" % module_name)
+            raise argparse.ArgumentTypeError(f"Could not find pages for module {module_name}")
     elif isinstance(gdbval_or_str, (int, gdb.Value)):
         addr = gdbval_or_str
         return addr
@@ -41,7 +44,7 @@ def address_or_module_name(s):
 
 
 parser = argparse.ArgumentParser(
-    description="Hexdumps data at the specified address or module name (or at $sp)"
+    description="Hexdumps data at the specified address or module name."
 )
 parser.add_argument(
     "address",
@@ -51,13 +54,13 @@ parser.add_argument(
     help="Address or module name to dump",
 )
 parser.add_argument(
-    "count", nargs="?", default=pwndbg.config.hexdump_bytes, help="Number of bytes to dump"
+    "count", nargs="?", default=pwndbg.gdblib.config.hexdump_bytes, help="Number of bytes to dump"
 )
 
 
-@pwndbg.commands.ArgparsedCommand(parser)
+@pwndbg.commands.ArgparsedCommand(parser, category=CommandCategory.MEMORY)
 @pwndbg.commands.OnlyWhenRunning
-def hexdump(address=None, count=pwndbg.config.hexdump_bytes):
+def hexdump(address, count=pwndbg.gdblib.config.hexdump_bytes) -> None:
     if hexdump.repeat:
         address = hexdump.last_address
         hexdump.offset += 1
@@ -65,16 +68,31 @@ def hexdump(address=None, count=pwndbg.config.hexdump_bytes):
         hexdump.offset = 0
 
     address = int(address)
-    address &= pwndbg.gdblib.arch.ptrmask
+    if address > pwndbg.gdblib.arch.ptrmask:
+        new_address = address & pwndbg.gdblib.arch.ptrmask
+        print(
+            message.warn("0x%x is larger than the maximum address, truncating to 0x%x instead"),
+            address,
+            new_address,
+        )
+        address = new_address
+
     count = max(int(count), 0)
-    width = int(pwndbg.config.hexdump_width)
-    group_width = int(pwndbg.config.hexdump_group_width)
+    width = int(pwndbg.gdblib.config.hexdump_width)
+
+    group_width = int(pwndbg.gdblib.config.hexdump_group_width)
     group_width = pwndbg.gdblib.typeinfo.ptrsize if group_width == -1 else group_width
+
+    # TODO: What if arch endian is big, and use_big_endian is false?
     flip_group_endianess = (
-        pwndbg.config.hexdump_group_use_big_endian and pwndbg.gdblib.arch.endian == "little"
+        pwndbg.gdblib.config.hexdump_group_use_big_endian and pwndbg.gdblib.arch.endian == "little"
     )
 
-    if count > address > 0x10000:
+    # The user may have input the start and end range to dump instead of the
+    # starting address and the number of bytes to dump. If the address is above
+    # some minimum address, and the count is larger than that address, we assume
+    # this is the case and correct it
+    if 0x10000 < address < count:
         count -= address
 
     try:
@@ -84,17 +102,19 @@ def hexdump(address=None, count=pwndbg.config.hexdump_bytes):
         print(e)
         return
 
-    for i, line in enumerate(
-        pwndbg.hexdump.hexdump(
-            data,
-            address=address,
-            width=width,
-            group_width=group_width,
-            flip_group_endianess=flip_group_endianess,
-            offset=hexdump.offset,
-        )
-    ):
+    result = pwndbg.hexdump.hexdump(
+        data,
+        address=address,
+        width=width,
+        group_width=group_width,
+        flip_group_endianess=flip_group_endianess,
+        offset=hexdump.offset,
+    )
+    for i, line in enumerate(result):
         print(line)
+
+    # If this command is entered again with no arguments, remember where we left off printing
+    # TODO: This is broken if the user inputs a count less than the width
     hexdump.offset += i
 
 

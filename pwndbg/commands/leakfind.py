@@ -4,23 +4,26 @@ Find a chain of leaks given some starting address.
 
 import argparse
 import queue
+from typing import Dict
+from typing import List
 
 import gdb
 
-import pwndbg.color.chain as C
 import pwndbg.color.memory as M
-import pwndbg.color.message as message
 import pwndbg.commands
-import pwndbg.vmmap
-from pwndbg.chain import config_arrow_right
+import pwndbg.gdblib.config
+import pwndbg.gdblib.vmmap
+from pwndbg.chain import c as C
+from pwndbg.color import message
+from pwndbg.commands import CommandCategory
 
 
 # Used to recursively print the pointer chain.
 # addr is a pointer. It is taken to be a child pointer.
 # visited_map is a map of children -> (parent,parent_start)
 def get_rec_addr_string(addr, visited_map):
-    page = pwndbg.vmmap.find(addr)
-    arrow_right = C.arrow(" %s " % config_arrow_right)
+    page = pwndbg.gdblib.vmmap.find(addr)
+    arrow_right = C.arrow(" %s " % pwndbg.gdblib.config.chain_arrow_right)
 
     if page is not None:
         if addr not in visited_map:
@@ -45,22 +48,25 @@ def get_rec_addr_string(addr, visited_map):
 
 
 # Useful for debugging. Prints a map of child -> (parent, parent_start)
-def dbg_print_map(maps):
+def dbg_print_map(maps) -> None:
     for child, parent_info in maps.items():
         print("0x%x + (0x%x, 0x%x)" % (child, parent_info[0], parent_info[1]))
 
 
-parser = argparse.ArgumentParser()
-parser.description = """
+parser = argparse.ArgumentParser(
+    formatter_class=argparse.RawTextHelpFormatter,
+    description="""
 Attempt to find a leak chain given a starting address.
 Scans memory near the given address, looks for pointers, and continues that process to attempt to find leaks.
 
 Example: leakfind $rsp --page_name=filename --max_offset=0x48 --max_depth=6. This would look for any chains of leaks \
 that point to a section in filename which begin near $rsp, are never 0x48 bytes further from a known pointer, \
 and are a maximum length of 6.
-"""
-parser.formatter_class = argparse.RawDescriptionHelpFormatter
-parser.add_argument("address", help="Starting address to find a leak chain from")
+""",
+)
+parser.add_argument(
+    "address", nargs="?", default="$sp", help="Starting address to find a leak chain from"
+)
 parser.add_argument(
     "-p",
     "--page_name",
@@ -94,14 +100,14 @@ parser.add_argument(
 )
 
 
-@pwndbg.commands.ArgparsedCommand(parser)
+@pwndbg.commands.ArgparsedCommand(parser, category=CommandCategory.MEMORY)
 @pwndbg.commands.OnlyWhenRunning
 def leakfind(
     address=None, page_name=None, max_offset=0x40, max_depth=0x4, step=0x1, negative_offset=0x0
 ):
     if address is None:
         raise argparse.ArgumentTypeError("No starting address provided.")
-    foundPages = pwndbg.vmmap.find(address)
+    foundPages = pwndbg.gdblib.vmmap.find(address)
 
     if not foundPages:
         raise argparse.ArgumentTypeError("Starting address is not mapped.")
@@ -126,7 +132,7 @@ def leakfind(
     # We need to store both so that we can nicely create our leak chain.
     visited_map = {}
     visited_set = {int(address)}
-    address_queue = queue.Queue()
+    address_queue: queue.Queue[int] = queue.Queue()
     address_queue.put(int(address))
     depth = 0
     time_to_depth_increase = 0
@@ -159,11 +165,11 @@ def leakfind(
                 break
 
     # A map of length->list of lines. Used to let us print in a somewhat nice manner.
-    output_map = {}
-    arrow_right = C.arrow(" %s " % config_arrow_right)
+    output_map: Dict[int, List[str]] = {}
+    arrow_right = C.arrow(" %s " % pwndbg.gdblib.config.chain_arrow_right)
 
     for child in visited_map:
-        child_page = pwndbg.vmmap.find(child)
+        child_page = pwndbg.gdblib.vmmap.find(child)
         if child_page is not None:
             if page_name is not None and page_name not in child_page.objfile:
                 continue
@@ -180,8 +186,8 @@ def leakfind(
                 output_map[chain_length] = [line]
 
     # Output sorted by length of chain
-    for chain_length in output_map:
-        for line in output_map[chain_length]:
+    for chain_length, lines in output_map.items():
+        for line in lines:
             print(line)
 
     if pwndbg.gdblib.qemu.is_qemu():

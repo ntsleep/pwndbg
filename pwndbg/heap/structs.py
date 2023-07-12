@@ -6,6 +6,7 @@ import pwndbg.gdblib.arch
 import pwndbg.gdblib.memory
 import pwndbg.gdblib.typeinfo
 import pwndbg.glibc
+from pwndbg.gdblib.ctypes import Structure
 
 
 def request2size(req):
@@ -14,22 +15,28 @@ def request2size(req):
     return (req + SIZE_SZ + MALLOC_ALIGN_MASK) & ~MALLOC_ALIGN_MASK
 
 
-def fastbin_index(size):
+def fastbin_index(size: int) -> int:
     if pwndbg.gdblib.arch.ptrsize == 8:
         return (size >> 4) - 2
     else:
         return (size >> 3) - 2
 
 
+# TODO: Move these heap constants and macros to elsewhere, because pwndbg/heap/ptmalloc.py also uses them, we are duplicating them here.
 SIZE_SZ = pwndbg.gdblib.arch.ptrsize
 MINSIZE = pwndbg.gdblib.arch.ptrsize * 4
-# i386 will override it to 16.
-# See https://elixir.bootlin.com/glibc/glibc-2.26/source/sysdeps/i386/malloc-alignment.h#L22
-MALLOC_ALIGN = (
-    16
-    if pwndbg.gdblib.arch.current == "i386" and pwndbg.glibc.get_version() >= (2, 26)
-    else pwndbg.gdblib.arch.ptrsize * 2
-)
+if pwndbg.gdblib.arch.current == "i386" and pwndbg.glibc.get_version() >= (2, 26):
+    # i386 will override it to 16 when GLIBC version >= 2.26
+    # See https://elixir.bootlin.com/glibc/glibc-2.26/source/sysdeps/i386/malloc-alignment.h#L22
+    MALLOC_ALIGN = 16
+elif hasattr(gdb.Type, "alignof"):
+    # See https://elixir.bootlin.com/glibc/glibc-2.37/source/sysdeps/generic/malloc-alignment.h#L27
+    long_double_alignment = pwndbg.gdblib.typeinfo.lookup_types("long double").alignof
+    MALLOC_ALIGN = long_double_alignment if 2 * SIZE_SZ < long_double_alignment else 2 * SIZE_SZ
+else:
+    # alignof doesn't available in GDB < 8.2 (https://sourceware.org/git/gitweb.cgi?p=binutils-gdb.git;a=blob_plain;f=gdb/NEWS;hb=gdb-8.2-release)
+    # Hardcoded the MALLOC_ALIGN to 16 for powerpc, and 2 * SIZE_SZ for other archs
+    MALLOC_ALIGN = 16 if pwndbg.gdblib.arch.current == "powerpc" else 2 * SIZE_SZ
 MALLOC_ALIGN_MASK = MALLOC_ALIGN - 1
 MAX_FAST_SIZE = 80 * SIZE_SZ // 4
 NBINS = 128
@@ -41,8 +48,14 @@ if pwndbg.gdblib.arch.ptrsize == 4:
     PTR = ctypes.c_uint32
     SIZE_T = ctypes.c_uint32
 else:
-    PTR = ctypes.c_uint64
-    SIZE_T = ctypes.c_uint64
+    PTR = ctypes.c_uint64  # type: ignore[misc]
+    SIZE_T = ctypes.c_uint64  # type: ignore[misc]
+
+DEFAULT_TOP_PAD = 131072
+DEFAULT_MMAP_MAX = 65536
+DEFAULT_MMAP_THRESHOLD = 128 * 1024
+DEFAULT_TRIM_THRESHOLD = 128 * 1024
+TCACHE_FILL_COUNT = 7
 
 
 class c_pvoid(PTR):
@@ -71,9 +84,47 @@ C2GDB_MAPPING = {
     c_size_t: pwndbg.gdblib.typeinfo.size_t,
 }
 
+# Use correct endian for the dictionary keys
+if pwndbg.gdblib.arch.endian == "little":
+    C2GDB_MAPPING = {k.__ctype_le__: v for k, v in C2GDB_MAPPING.items()}
+else:
+    C2GDB_MAPPING = {k.__ctype_be__: v for k, v in C2GDB_MAPPING.items()}
+
+
+class FakeGDBField:
+    """
+    Fake gdb.Field for compatibility
+    """
+
+    def __init__(
+        self,
+        bitpos,
+        name: str,
+        type,
+        parent_type,
+        enumval=None,
+        artificial=False,
+        is_base_class=False,
+        bitsize=0,
+    ) -> None:
+        # Note: pwndbg only uses `name` currently
+        self.bitpos = bitpos
+        self.name = name
+        self.type = type
+        self.parent_type = parent_type
+        if enumval:
+            self.enumval = enumval
+        self.artificial = artificial
+        self.is_base_class = is_base_class
+        self.bitsize = bitsize
+
 
 class CStruct2GDB:
+    code = gdb.TYPE_CODE_STRUCT
     _c_struct = None
+
+    def __init__(self, address: int) -> None:
+        self.address = address
 
     def __int__(self) -> int:
         """
@@ -102,7 +153,7 @@ class CStruct2GDB:
         """
         output = "{\n"
         for f in self._c_struct._fields_:
-            output += "  %s = %s,\n" % (f[0], self.read_field(f[0]))
+            output += f"  {f[0]} = {self.read_field(f[0])},\n"
         output += "}"
         return output
 
@@ -120,15 +171,54 @@ class CStruct2GDB:
     @property
     def type(self):
         """
-        Returns self to make it compatible with the `gdb.Value` interface.
+        Returns type(self) to make it compatible with the `gdb.Value` interface.
         """
-        return self
+        return type(self)
+
+    @classmethod
+    def unqualified(cls):
+        """
+        Returns cls to make it compatible with the `gdb.types.has_field()` interface.
+        """
+        return cls
+
+    @classmethod
+    def fields(cls):
+        """
+        Return fields of the struct to make it compatible with the `gdb.Type` interface.
+        """
+        fake_gdb_fields = []
+        for f in cls._c_struct._fields_:
+            field_name = f[0]
+            field_type = f[1]
+            bitpos = getattr(cls._c_struct, field_name).offset * 8
+            if hasattr(field_type, "_length_"):  # f is a ctypes Array
+                t = C2GDB_MAPPING[field_type._type_]
+                _type = t.array(field_type._length_ - 1)
+            else:
+                _type = C2GDB_MAPPING[field_type]
+            fake_gdb_fields.append(FakeGDBField(bitpos, field_name, _type, cls))
+        return fake_gdb_fields
+
+    @classmethod
+    def keys(cls) -> list:
+        """
+        Return a list of the names of the fields in the struct to make it compatible with the `gdb.Type` interface.
+        """
+        return [f[0] for f in cls._c_struct._fields_]
 
     def get_field_address(self, field: str) -> int:
         """
         Returns the address of the specified field.
         """
         return self.address + getattr(self._c_struct, field).offset
+
+    @classmethod
+    def get_field_offset(cls, field: str) -> int:
+        """
+        Returns the offset of the specified field.
+        """
+        return getattr(cls._c_struct, field).offset
 
     def items(self) -> tuple:
         """
@@ -137,7 +227,7 @@ class CStruct2GDB:
         return tuple((field[0], getattr(self, field[0])) for field in self._c_struct._fields_)
 
 
-class c_malloc_state_2_26(ctypes.LittleEndianStructure):
+class c_malloc_state_2_26(Structure):
     """
     This class represents malloc_state struct for GLIBC < 2.27 as a ctypes struct.
 
@@ -200,7 +290,7 @@ class c_malloc_state_2_26(ctypes.LittleEndianStructure):
     ]
 
 
-class c_malloc_state_2_27(ctypes.LittleEndianStructure):
+class c_malloc_state_2_27(Structure):
     """
     This class represents malloc_state struct for GLIBC >= 2.27 as a ctypes struct.
 
@@ -280,20 +370,8 @@ class MallocState(CStruct2GDB):
         _c_struct = c_malloc_state_2_26
     sizeof = ctypes.sizeof(_c_struct)
 
-    def __init__(self, address: int) -> None:
-        self.address = address
 
-    @staticmethod
-    def keys() -> tuple:
-        """
-        Return a tuple of the names of the fields in the struct.
-        """
-        if pwndbg.glibc.get_version() >= (2, 27):
-            return tuple(field[0] for field in c_malloc_state_2_27._fields_)
-        return tuple(field[0] for field in c_malloc_state_2_26._fields_)
-
-
-class c_heap_info(ctypes.LittleEndianStructure):
+class c_heap_info(Structure):
     """
     This class represents heap_info struct as a ctypes struct.
 
@@ -330,18 +408,8 @@ class HeapInfo(CStruct2GDB):
     _c_struct = c_heap_info
     sizeof = ctypes.sizeof(_c_struct)
 
-    def __init__(self, address: int) -> None:
-        self.address = address
 
-    @staticmethod
-    def keys() -> tuple:
-        """
-        Return a tuple of the names of the fields in the struct.
-        """
-        return tuple(field[0] for field in c_heap_info._fields_)
-
-
-class c_malloc_chunk(ctypes.LittleEndianStructure):
+class c_malloc_chunk(Structure):
     """
     This class represents malloc_chunk struct as a ctypes struct.
 
@@ -379,18 +447,8 @@ class MallocChunk(CStruct2GDB):
     _c_struct = c_malloc_chunk
     sizeof = ctypes.sizeof(_c_struct)
 
-    def __init__(self, address: int) -> None:
-        self.address = address
 
-    @staticmethod
-    def keys() -> tuple:
-        """
-        Return a tuple of the names of the fields in the struct.
-        """
-        return tuple(field[0] for field in c_malloc_chunk._fields_)
-
-
-class c_tcache_perthread_struct_2_29(ctypes.LittleEndianStructure):
+class c_tcache_perthread_struct_2_29(Structure):
     """
     This class represents tcache_perthread_struct for GLIBC < 2.30 as a ctypes struct.
 
@@ -409,7 +467,7 @@ class c_tcache_perthread_struct_2_29(ctypes.LittleEndianStructure):
     ]
 
 
-class c_tcache_perthread_struct_2_30(ctypes.LittleEndianStructure):
+class c_tcache_perthread_struct_2_30(Structure):
     """
     This class represents the tcache_perthread_struct for GLIBC >= 2.30 as a ctypes struct.
 
@@ -439,20 +497,8 @@ class TcachePerthreadStruct(CStruct2GDB):
         _c_struct = c_tcache_perthread_struct_2_29
     sizeof = ctypes.sizeof(_c_struct)
 
-    def __init__(self, address: int) -> None:
-        self.address = address
 
-    @staticmethod
-    def keys() -> tuple:
-        """
-        Return a tuple of the names of the fields in the struct.
-        """
-        if pwndbg.glibc.get_version() >= (2, 30):
-            return tuple(field[0] for field in c_tcache_perthread_struct_2_30._fields_)
-        return tuple(field[0] for field in c_tcache_perthread_struct_2_29._fields_)
-
-
-class c_tcache_entry_2_28(ctypes.LittleEndianStructure):
+class c_tcache_entry_2_28(Structure):
     """
     This class represents the tcache_entry struct for GLIBC < 2.29 as a ctypes struct.
 
@@ -467,7 +513,7 @@ class c_tcache_entry_2_28(ctypes.LittleEndianStructure):
     _fields_ = [("next", c_pvoid)]
 
 
-class c_tcache_entry_2_29(ctypes.LittleEndianStructure):
+class c_tcache_entry_2_29(Structure):
     """
     This class represents the tcache_entry struct for GLIBC >= 2.29 as a ctypes struct.
 
@@ -484,7 +530,7 @@ class c_tcache_entry_2_29(ctypes.LittleEndianStructure):
     _fields_ = [("next", c_pvoid), ("key", c_pvoid)]
 
 
-class TcacheEntry:
+class TcacheEntry(CStruct2GDB):
     """
     This class represents the tcache_entry struct with interface compatible with `gdb.Value`.
     """
@@ -495,24 +541,66 @@ class TcacheEntry:
         _c_struct = c_tcache_entry_2_28
     sizeof = ctypes.sizeof(_c_struct)
 
-    def __init__(self, address: int) -> None:
-        self.address = address
 
-    @staticmethod
-    def keys() -> tuple:
-        """
-        Return a tuple of the names of the fields in the struct.
-        """
-        if pwndbg.glibc.get_version() >= (2, 29):
-            return tuple(field[0] for field in c_tcache_entry_2_29._fields_)
-        return tuple(field[0] for field in c_tcache_entry_2_28._fields_)
-
-
-class c_malloc_par_2_25(ctypes.LittleEndianStructure):
+class c_malloc_par_2_23(Structure):
     """
-    This class represents the malloc_par struct for GLIBC < 2.26 as a ctypes struct.
+    This class represents the malloc_par struct for GLIBC < 2.24 as a ctypes struct.
+
+    https://github.com/bminor/glibc/blob/glibc-2.23/malloc/malloc.c#L1726
+
+    struct malloc_par
+    {
+    /* Tunable parameters */
+    unsigned long trim_threshold;
+    INTERNAL_SIZE_T top_pad;
+    INTERNAL_SIZE_T mmap_threshold;
+    INTERNAL_SIZE_T arena_test;
+    INTERNAL_SIZE_T arena_max;
+
+    /* Memory map support */
+    int n_mmaps;
+    int n_mmaps_max;
+    int max_n_mmaps;
+    /* the mmap_threshold is dynamic, until the user sets
+        it manually, at which point we need to disable any
+        dynamic behavior. */
+    int no_dyn_threshold;
+
+    /* Statistics */
+    INTERNAL_SIZE_T mmapped_mem;
+    /*INTERNAL_SIZE_T  sbrked_mem;*/
+    /*INTERNAL_SIZE_T  max_sbrked_mem;*/
+    INTERNAL_SIZE_T max_mmapped_mem;
+    INTERNAL_SIZE_T max_total_mem;  /* only kept for NO_THREADS */
+
+    /* First address handed out by MORECORE/sbrk.  */
+    char *sbrk_base;
+    };
+    """
+
+    _fields_ = [
+        ("trim_threshold", c_size_t),
+        ("top_pad", c_size_t),
+        ("mmap_threshold", c_size_t),
+        ("arena_test", c_size_t),
+        ("arena_max", c_size_t),
+        ("n_mmaps", ctypes.c_int32),
+        ("n_mmaps_max", ctypes.c_int32),
+        ("max_n_mmaps", ctypes.c_int32),
+        ("no_dyn_threshold", ctypes.c_int32),
+        ("mmapped_mem", c_size_t),
+        ("max_mmapped_mem", c_size_t),
+        ("max_total_mem", c_size_t),
+        ("sbrk_base", c_pvoid),
+    ]
+
+
+class c_malloc_par_2_24(Structure):
+    """
+    This class represents the malloc_par struct for GLIBC >= 2.24 as a ctypes struct.
 
     https://github.com/bminor/glibc/blob/glibc-2.25/malloc/malloc.c#L1690
+    https://github.com/bminor/glibc/blob/glibc-2.24/malloc/malloc.c#L1719
 
     struct malloc_par
     {
@@ -557,7 +645,7 @@ class c_malloc_par_2_25(ctypes.LittleEndianStructure):
     ]
 
 
-class c_malloc_par_2_26(ctypes.LittleEndianStructure):
+class c_malloc_par_2_26(Structure):
     """
     This class represents the malloc_par struct for GLIBC >= 2.26 as a ctypes struct.
 
@@ -616,7 +704,83 @@ class c_malloc_par_2_26(ctypes.LittleEndianStructure):
         ("sbrk_base", c_pvoid),
         ("tcache_bins", c_size_t),
         ("tcache_max_bytes", c_size_t),
-        ("tcache_count", ctypes.c_int32),
+        ("tcache_count", c_size_t),
+        ("tcache_unsorted_limit", c_size_t),
+    ]
+
+
+class c_malloc_par_2_35(Structure):
+    """
+    This class represents the malloc_par struct for GLIBC >= 2.35 as a ctypes struct.
+
+    https://github.com/bminor/glibc/blob/glibc-2.35/malloc/malloc.c#L1874
+
+    struct malloc_par
+    {
+        /* Tunable parameters */
+        unsigned long trim_threshold;
+        INTERNAL_SIZE_T top_pad;
+        INTERNAL_SIZE_T mmap_threshold;
+        INTERNAL_SIZE_T arena_test;
+        INTERNAL_SIZE_T arena_max;
+
+    #if HAVE_TUNABLES
+        /* Transparent Large Page support.  */
+        INTERNAL_SIZE_T thp_pagesize;
+        /* A value different than 0 means to align mmap allocation to hp_pagesize
+            add hp_flags on flags.  */
+        INTERNAL_SIZE_T hp_pagesize;
+        int hp_flags;
+    #endif
+
+        /* Memory map support */
+        int n_mmaps;
+        int n_mmaps_max;
+        int max_n_mmaps;
+        /* the mmap_threshold is dynamic, until the user sets
+            it manually, at which point we need to disable any
+            dynamic behavior. */
+        int no_dyn_threshold;
+
+        /* Statistics */
+        INTERNAL_SIZE_T mmapped_mem;
+        INTERNAL_SIZE_T max_mmapped_mem;
+
+        /* First address handed out by MORECORE/sbrk.  */
+        char *sbrk_base;
+
+    #if USE_TCACHE
+        /* Maximum number of buckets to use.  */
+        size_t tcache_bins;
+        size_t tcache_max_bytes;
+        /* Maximum number of chunks in each bucket.  */
+        size_t tcache_count;
+        /* Maximum number of chunks to remove from the unsorted list, which
+            aren't used to prefill the cache.  */
+        size_t tcache_unsorted_limit;
+    #endif
+    };
+    """
+
+    _fields_ = [
+        ("trim_threshold", c_size_t),
+        ("top_pad", c_size_t),
+        ("mmap_threshold", c_size_t),
+        ("arena_test", c_size_t),
+        ("arena_max", c_size_t),
+        ("thp_pagesize", c_size_t),
+        ("hp_pagesize", c_size_t),
+        ("hp_flags", ctypes.c_int32),
+        ("n_mmaps", ctypes.c_int32),
+        ("n_mmaps_max", ctypes.c_int32),
+        ("max_n_mmaps", ctypes.c_int32),
+        ("no_dyn_threshold", ctypes.c_int32),
+        ("mmapped_mem", c_size_t),
+        ("max_mmapped_mem", c_size_t),
+        ("sbrk_base", c_pvoid),
+        ("tcache_bins", c_size_t),
+        ("tcache_max_bytes", c_size_t),
+        ("tcache_count", c_size_t),
         ("tcache_unsorted_limit", c_size_t),
     ]
 
@@ -626,20 +790,42 @@ class MallocPar(CStruct2GDB):
     This class represents the malloc_par struct with interface compatible with `gdb.Value`.
     """
 
-    if pwndbg.glibc.get_version() >= (2, 26):
+    if pwndbg.glibc.get_version() >= (2, 35):
+        _c_struct = c_malloc_par_2_35
+    elif pwndbg.glibc.get_version() >= (2, 26):
         _c_struct = c_malloc_par_2_26
+    elif pwndbg.glibc.get_version() >= (2, 24):
+        _c_struct = c_malloc_par_2_24
     else:
-        _c_struct = c_malloc_par_2_25
+        _c_struct = c_malloc_par_2_23
     sizeof = ctypes.sizeof(_c_struct)
 
-    def __init__(self, address: int) -> None:
-        self.address = address
 
-    @staticmethod
-    def keys() -> tuple:
-        """
-        Return a tuple of the names of the fields in the struct.
-        """
-        if pwndbg.glibc.get_version() >= (2, 26):
-            return tuple(field[0] for field in c_malloc_par_2_26._fields_)
-        return tuple(field[0] for field in c_malloc_par_2_25._fields_)
+# https://github.com/bminor/glibc/blob/glibc-2.37/malloc/malloc.c#L1911-L1926
+# static struct malloc_par mp_ =
+# {
+#   .top_pad = DEFAULT_TOP_PAD,
+#   .n_mmaps_max = DEFAULT_MMAP_MAX,
+#   .mmap_threshold = DEFAULT_MMAP_THRESHOLD,
+#   .trim_threshold = DEFAULT_TRIM_THRESHOLD,
+# #define NARENAS_FROM_NCORES(n) ((n) * (sizeof (long) == 4 ? 2 : 8))
+#   .arena_test = NARENAS_FROM_NCORES (1)
+# #if USE_TCACHE
+#   ,
+#   .tcache_count = TCACHE_FILL_COUNT,
+#   .tcache_bins = TCACHE_MAX_BINS,
+#   .tcache_max_bytes = tidx2usize (TCACHE_MAX_BINS-1),
+#   .tcache_unsorted_limit = 0 /* No limit.  */
+# #endif
+# };
+DEFAULT_MP_ = MallocPar._c_struct()
+DEFAULT_MP_.top_pad = DEFAULT_TOP_PAD
+DEFAULT_MP_.n_mmaps_max = DEFAULT_MMAP_MAX
+DEFAULT_MP_.mmap_threshold = DEFAULT_MMAP_THRESHOLD
+DEFAULT_MP_.trim_threshold = DEFAULT_TRIM_THRESHOLD
+DEFAULT_MP_.arena_test = 2 if pwndbg.gdblib.arch.ptrsize == 4 else 8
+if MallocPar._c_struct != c_malloc_par_2_23:
+    # the only difference between 2.23 and the rest is the lack of tcache
+    DEFAULT_MP_.tcache_count = TCACHE_FILL_COUNT
+    DEFAULT_MP_.tcache_bins = TCACHE_MAX_BINS
+    DEFAULT_MP_.tcache_max_bytes = (TCACHE_MAX_BINS - 1) * MALLOC_ALIGN + MINSIZE - SIZE_SZ

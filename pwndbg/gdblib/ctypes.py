@@ -15,13 +15,12 @@ import pwndbg.gdblib.arch
 import pwndbg.gdblib.events
 
 module = sys.modules[__name__]
+Structure = ctypes.LittleEndianStructure  # default Structure type
 
 
 @pwndbg.gdblib.events.start
 @pwndbg.gdblib.events.new_objfile
-def update():
-    global module
-
+def update() -> None:
     if pwndbg.gdblib.arch.endian == "little":
         Structure = ctypes.LittleEndianStructure
     else:
